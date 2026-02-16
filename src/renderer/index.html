@@ -1,0 +1,445 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DayZ Server Manager</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <div class="title-bar" id="title-bar">
+            <div class="title-bar-drag-region">
+                <div class="title-bar-title">DayZ Server Manager</div>
+            </div>
+            <div class="title-bar-controls">
+                <button class="title-bar-button" id="title-bar-minimize" title="Minimize">−</button>
+                <button class="title-bar-button" id="title-bar-maximize" title="Maximize">□</button>
+                <button class="title-bar-button" id="title-bar-close" title="Close">×</button>
+            </div>
+        </div>
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <h1 class="app-title">DayZ Server Manager</h1>
+            </div>
+            <nav class="top-bar-nav">
+                <button class="nav-item active" data-panel="server">
+                    <span class="nav-icon">🖥️</span>
+                    <span class="nav-text">Server</span>
+                </button>
+                <button class="nav-item" data-panel="servers">
+                    <span class="nav-icon">🎮</span>
+                    <span class="nav-text">Servers</span>
+                </button>
+                <button class="nav-item" data-panel="mods">
+                    <span class="nav-icon">📦</span>
+                    <span class="nav-text">Mods</span>
+                </button>
+                <button class="nav-item" data-panel="browser">
+                    <span class="nav-icon">🔍</span>
+                    <span class="nav-text">Browse</span>
+                </button>
+                <button class="nav-item" data-panel="config">
+                    <span class="nav-icon">⚙️</span>
+                    <span class="nav-text">Config</span>
+                </button>
+                <button class="nav-item" data-panel="logs">
+                    <span class="nav-icon">📋</span>
+                    <span class="nav-text">Logs</span>
+                </button>
+                <button class="nav-item" data-panel="rcon">
+                    <span class="nav-icon">🎮</span>
+                    <span class="nav-text">RCON</span>
+                </button>
+                <button class="nav-item" data-panel="settings">
+                    <span class="nav-icon">🔧</span>
+                    <span class="nav-text">Settings</span>
+                </button>
+            </nav>
+            <div class="top-bar-right">
+                <div class="status-indicators">
+                    <span class="status-badge" id="topbar-server-status">Offline</span>
+                    <span class="status-badge" id="topbar-player-count">0/0</span>
+                </div>
+            </div>
+            <div class="top-bar-progress" id="sidebar-progress" style="display: none;">
+                <div class="progress-header">
+                    <span class="progress-title" id="sidebar-progress-title">Downloading...</span>
+                    <button class="progress-close" id="sidebar-progress-close" title="Hide progress">&times;</button>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="sidebar-progress-fill"></div>
+                    </div>
+                    <div class="progress-text" id="sidebar-progress-text">0%</div>
+                </div>
+                <div class="progress-queue-info" id="progress-queue-info" style="display: none;">
+                    <span id="progress-queue-text">Queue: 0 pending</span>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <div class="panel" id="servers-panel">
+                <div class="panel-header"><h2>Server Control</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <h3>Server Status</h3>
+                        <div class="status-info">
+                            <div class="status-item">
+                                <label>Installation Path:</label>
+                                <span id="server-control-path">Not set</span>
+                                <button class="btn btn-secondary btn-sm" id="server-control-select-path">Change Path</button>
+                                <button class="btn btn-secondary btn-sm" id="go-to-installation">Go to Installation</button>
+                            </div>
+                            <div class="status-item"><label>Installation Status:</label><span id="server-control-install-status">Unknown</span></div>
+                            <div class="status-item"><label>Server Status:</label><span id="server-control-status" class="status-badge">Stopped</span></div>
+                            <div class="status-item"><label>Process ID:</label><span id="server-pid">-</span></div>
+                            <div class="status-item"><label>Players:</label><span id="player-count">0/0</span></div>
+                            <div class="status-item"><label>CPU Usage:</label><span id="server-cpu">0%</span></div>
+                            <div class="status-item"><label>RAM Usage:</label><span id="server-ram">0 MB</span></div>
+                        </div>
+                        <div class="action-buttons">
+                            <button class="btn btn-primary" id="start-server-btn">Start Server</button>
+                            <button class="btn btn-danger" id="stop-server-btn" disabled>Stop Server</button>
+                            <button class="btn btn-secondary" id="restart-server-btn" disabled>Restart Server</button>
+                            <button class="btn btn-secondary" id="restart-countdown-btn" disabled>Restart with Countdown</button>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3>Server Configuration</h3>
+                        <div class="form-group">
+                            <label>Server Profile:</label>
+                            <select class="form-input" id="server-profile-select"><option value="default">default</option></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Additional Parameters:</label>
+                            <input type="text" class="form-input" id="server-parameters" placeholder="e.g., -port=2302 -DoBattlEye">
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Scheduled Restarts</h3>
+                            <button class="btn btn-primary btn-sm" id="add-scheduled-restart">Add Schedule</button>
+                        </div>
+                        <div class="scheduled-restarts-list" id="scheduled-restarts-list">
+                            <div class="empty-state">No scheduled restarts</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel active" id="server-panel">
+                <div class="panel-header"><h2>Server Installation</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <h3>Server Installation Status</h3>
+                        <div class="status-info">
+                            <div class="status-item">
+                                <label>Installation Path:</label>
+                                <span id="server-path">Not set</span>
+                                <button class="btn btn-secondary btn-sm" id="select-server-path">Select Path</button>
+                            </div>
+                            <div class="status-item"><label>Installation Status:</label><span id="server-status">Unknown</span></div>
+                            <div class="status-item"><label>Version:</label><span id="server-version">-</span></div>
+                            <div class="status-item">
+                                <label>Server Control:</label>
+                                <button class="btn btn-primary btn-sm" id="go-to-server-control" disabled>Go to Server Control</button>
+                            </div>
+                        </div>
+                        <div class="action-buttons">
+                            <button class="btn btn-primary" id="install-server">Install Server</button>
+                            <button class="btn btn-secondary" id="update-server">Update Server</button>
+                            <button class="btn btn-secondary" id="validate-server">Validate Installation</button>
+                        </div>
+                        <div class="progress-container" id="server-progress" style="display: none;">
+                            <div class="progress-bar"><div class="progress-fill" id="server-progress-fill"></div></div>
+                            <div class="progress-text" id="server-progress-text"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="mods-panel">
+                <div class="panel-header"><h2>Installed Mods</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <div class="card-header">
+                            <div><h3>Workshop Mods</h3><span class="mod-counter" id="mod-counter">0 mods</span></div>
+                            <button class="btn btn-primary btn-sm" id="add-mod">Add Mod</button>
+                        </div>
+                        <div class="mods-list" id="mods-list"><div class="empty-state">No mods installed</div></div>
+                        <div class="action-buttons">
+                            <button class="btn btn-secondary" id="update-all-mods">Update All Mods</button>
+                            <button class="btn btn-secondary" id="refresh-mods">Refresh List</button>
+                            <button class="btn btn-secondary" id="scan-workshop-folder">Scan Workshop Folder</button>
+                            <button class="btn btn-secondary" id="export-modlist">Export Modlist</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="browser-panel">
+                <div class="panel-header"><h2>Browse Workshop Mods</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <div class="search-container">
+                            <input type="text" class="search-input" id="mod-search-input" placeholder="Search mods by name...">
+                            <select class="sort-select" id="mod-sort">
+                                <option value="relevance">Relevance</option>
+                                <option value="mostsubscribed">Most Subscribed</option>
+                                <option value="trend">Trending</option>
+                            </select>
+                            <button class="btn btn-primary" id="search-mods">Search</button>
+                        </div>
+                        <div class="mods-grid" id="mods-grid"><div class="empty-state">Search for mods to get started</div></div>
+                        <div class="pagination" id="mod-pagination" style="display: none;">
+                            <button class="btn btn-secondary" id="prev-page">Previous</button>
+                            <span class="page-info" id="page-info">Page 1 of 1</span>
+                            <button class="btn btn-secondary" id="next-page">Next</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="config-panel">
+                <div class="panel-header"><h2>Configuration Editor</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <div class="config-selector">
+                            <label>Config File:</label>
+                            <select class="config-select" id="config-file-select"><option value="">Select a config file...</option></select>
+                            <button class="btn btn-secondary btn-sm" id="refresh-configs">Refresh</button>
+                        </div>
+                        <div class="config-editor-container">
+                            <textarea class="config-editor" id="config-editor" placeholder="Select a config file to edit..."></textarea>
+                        </div>
+                        <div class="action-buttons">
+                            <button class="btn btn-primary" id="save-config">Save</button>
+                            <button class="btn btn-secondary" id="validate-config">Validate</button>
+                            <button class="btn btn-secondary" id="reload-config">Reload</button>
+                        </div>
+                        <div class="config-status" id="config-status"></div>
+                    </div>
+
+                    <div class="card">
+                        <h3>CE Folder Editor</h3>
+                        <div class="ce-folder-editor">
+                            <div class="form-group">
+                                <label>Mission:</label>
+                                <select class="form-input" id="ce-mission-select"><option value="">Select a mission...</option></select>
+                            </div>
+                            <div class="form-group">
+                                <label>CE Folder Name:</label>
+                                <input type="text" class="form-input" id="ce-folder-name" placeholder="e.g., modded">
+                                <button class="btn btn-secondary btn-sm" id="scan-ce-folder">Scan Folder</button>
+                            </div>
+                            <div class="ce-folder-files" id="ce-folder-files" style="display: none;">
+                                <h4>Files in CE Folder</h4>
+                                <div class="ce-files-list" id="ce-files-list"></div>
+                                <div class="action-buttons" style="margin-top: 15px;">
+                                    <button class="btn btn-primary" id="save-ce-folder">Save to cfgeconomycore.xml</button>
+                                    <button class="btn btn-secondary" id="reload-ce-folder">Reload</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="rcon-panel">
+                <div class="panel-header"><h2>RCON Console</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <h3>Connection</h3>
+                        <div class="rcon-connection">
+                            <div class="form-group"><label>Host:</label><input type="text" class="form-input" id="rcon-host" value="127.0.0.1" placeholder="127.0.0.1"></div>
+                            <div class="form-group"><label>Port:</label><input type="number" class="form-input" id="rcon-port" value="2302" placeholder="2302"></div>
+                            <div class="form-group"><label>Password:</label><input type="password" class="form-input" id="rcon-password" placeholder="RCON password"></div>
+                            <div class="form-group">
+                                <button class="btn btn-primary" id="rcon-connect">Connect</button>
+                                <button class="btn btn-secondary" id="rcon-disconnect" disabled>Disconnect</button>
+                                <span class="status-badge" id="rcon-status">Disconnected</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>Quick Actions</h3>
+                        <div class="rcon-quick-actions">
+                            <div class="form-group"><label>Player Name:</label><input type="text" class="form-input" id="rcon-player-name" placeholder="Player name"></div>
+                            <div class="action-buttons">
+                                <button class="btn btn-secondary" id="rcon-kick-btn">Kick</button>
+                                <button class="btn btn-secondary" id="rcon-ban-btn">Ban</button>
+                                <button class="btn btn-secondary" id="rcon-refresh-players">Refresh Players</button>
+                            </div>
+                            <div class="form-group">
+                                <label>Server Message:</label>
+                                <input type="text" class="form-input" id="rcon-message" placeholder="Message to broadcast">
+                                <button class="btn btn-secondary" id="rcon-say-btn">Say</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card"><h3>Players Online</h3><div class="rcon-players-list" id="rcon-players-list"><div class="empty-state">Not connected</div></div></div>
+                    <div class="card">
+                        <h3>Command Console</h3>
+                        <div class="rcon-console">
+                            <div class="rcon-output" id="rcon-output"></div>
+                            <div class="rcon-input-group">
+                                <input type="text" class="form-input" id="rcon-command" placeholder="Enter RCON command" autocomplete="off">
+                                <button class="btn btn-primary" id="rcon-send-command">Send</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="logs-panel">
+                <div class="panel-header"><h2>Log Viewer</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <div class="log-controls">
+                            <div class="log-selector">
+                                <label>Log File:</label>
+                                <select class="log-select" id="log-file-select"><option value="">Select a log file...</option></select>
+                                <button class="btn btn-secondary btn-sm" id="refresh-logs">Refresh</button>
+                            </div>
+                            <div class="log-filters">
+                                <select class="log-level-filter" id="log-level-filter">
+                                    <option value="">All Levels</option>
+                                    <option value="Info">Info</option>
+                                    <option value="Warning">Warning</option>
+                                    <option value="Error">Error</option>
+                                    <option value="Debug">Debug</option>
+                                </select>
+                                <input type="text" class="log-search" id="log-search" placeholder="Search logs...">
+                                <button class="btn btn-secondary btn-sm" id="export-logs">Export</button>
+                            </div>
+                        </div>
+                        <div class="log-viewer-tabs">
+                            <button class="tab-btn active" data-tab="historical">Historical</button>
+                            <button class="tab-btn" data-tab="realtime">Real-Time</button>
+                        </div>
+                        <div class="log-viewer-container">
+                            <div class="log-viewer" id="historical-log-viewer"><div class="empty-state">Select a log file to view</div></div>
+                            <div class="log-viewer" id="realtime-log-viewer" style="display: none;">
+                                <div class="realtime-controls">
+                                    <button class="btn btn-primary btn-sm" id="start-tail">Start Tailing</button>
+                                    <button class="btn btn-secondary btn-sm" id="stop-tail">Stop Tailing</button>
+                                    <label class="checkbox-label"><input type="checkbox" id="auto-scroll" checked>Auto-scroll</label>
+                                </div>
+                                <div class="log-content" id="realtime-log-content"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="settings-panel">
+                <div class="panel-header"><h2>Settings</h2></div>
+                <div class="panel-content">
+                    <div class="card">
+                        <h3>Paths</h3>
+                        <div class="settings-item">
+                            <label>Server Installation Path:</label>
+                            <div class="settings-input-group">
+                                <input type="text" class="settings-input" id="settings-server-path" readonly>
+                                <button class="btn btn-secondary btn-sm" id="settings-select-server-path">Browse</button>
+                            </div>
+                        </div>
+                        <div class="settings-item">
+                            <label>SteamCMD Path:</label>
+                            <div class="settings-input-group">
+                                <input type="text" class="settings-input" id="settings-steamcmd-path" readonly>
+                                <button class="btn btn-secondary btn-sm" id="download-steamcmd">Download SteamCMD</button>
+                            </div>
+                        </div>
+                        <h3>Preferences</h3>
+                        <div class="settings-item"><label class="checkbox-label"><input type="checkbox" id="auto-update">Auto-update server on startup</label></div>
+                        <div class="settings-item"><label class="checkbox-label"><input type="checkbox" id="check-updates" checked>Check for updates on startup</label></div>
+                        <h3>Steam Credentials</h3>
+                        <div class="settings-item"><label class="checkbox-label"><input type="checkbox" id="use-steam-credentials">Use Steam account credentials</label></div>
+                        <div class="settings-item"><label>Steam Username:</label><input type="text" class="settings-input" id="steam-username" placeholder="Enter Steam username"></div>
+                        <div class="settings-item"><label>Steam Password:</label><input type="password" class="settings-input" id="steam-password" placeholder="Enter Steam password"></div>
+                        <div class="action-buttons" style="margin-top: 20px;"><button class="btn btn-primary" id="save-settings">Save Settings</button></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div class="modal" id="mod-details-modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3 id="mod-details-title">Mod Details</h3><button class="modal-close" id="close-mod-details">&times;</button></div>
+            <div class="modal-body" id="mod-details-body"></div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="download-mod-from-details">Download</button>
+                <button class="btn btn-secondary" id="cancel-mod-details">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="add-mod-modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>Add Mod</h3><button class="modal-close" id="close-add-mod">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Workshop ID or Collection ID:</label>
+                    <input type="text" class="form-input" id="mod-workshop-id" placeholder="Enter Workshop ID or Collection ID">
+                </div>
+                <div class="form-group"><label><input type="checkbox" id="is-collection-checkbox"> This is a collection ID</label></div>
+                <div class="form-group"><label><input type="checkbox" id="add-to-queue-checkbox" checked> Add to download queue</label></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="add-mod-submit">Add</button>
+                <button class="btn btn-secondary" id="cancel-add-mod">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="scheduled-restart-modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>Schedule Restart</h3><button class="modal-close" id="close-scheduled-restart">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-group"><label>Restart Time:</label><input type="datetime-local" class="form-input" id="restart-time"></div>
+                <div class="form-group">
+                    <label>Repeat:</label>
+                    <select class="form-input" id="restart-repeat">
+                        <option value="once">Once</option>
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="save-scheduled-restart">Save</button>
+                <button class="btn btn-secondary" id="cancel-scheduled-restart">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="restart-countdown-modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>Restart Countdown</h3></div>
+            <div class="modal-body">
+                <p>Server will restart in <strong id="countdown-display">0</strong> seconds.</p>
+                <p>Remaining: <span id="countdown-seconds">0</span>s</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="cancel-countdown">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/sidebarProgress.js"></script>
+    <script src="js/app.js"></script>
+    <script src="js/serverPanel.js"></script>
+    <script src="js/serverControl.js"></script>
+    <script src="js/modPanel.js"></script>
+    <script src="js/modBrowser.js"></script>
+    <script src="js/configEditor.js"></script>
+    <script src="js/logViewer.js"></script>
+    <script src="js/rconPanel.js"></script>
+</body>
+</html>
