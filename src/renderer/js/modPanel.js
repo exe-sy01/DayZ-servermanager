@@ -213,8 +213,9 @@ class ModPanel {
 
         // Drag start
         newContainer.addEventListener('dragstart', (e) => {
-            if (e.target.classList.contains('mod-item')) {
-                draggedElement = e.target;
+            const modItem = e.target.closest('.mod-item');
+            if (modItem) {
+                draggedElement = modItem;
                 draggedIndex = Array.from(newContainer.children).indexOf(draggedElement);
                 draggedElement.classList.add('dragging');
                 e.dataTransfer.effectAllowed = 'move';
@@ -263,7 +264,8 @@ class ModPanel {
                 const midpoint = rect.top + rect.height / 2;
                 const insertAfter = e.clientY > midpoint;
 
-                const finalIndex = insertAfter ? dropIndex + 1 : dropIndex;
+                const targetIndex = insertAfter ? dropIndex + 1 : dropIndex;
+                const finalIndex = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex;
                 
                 // Get new order array
                 const modOrder = Array.from(newContainer.children)
@@ -728,4 +730,3 @@ function initializeModPanel() {
 }
 
 initializeModPanel();
-

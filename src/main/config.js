@@ -271,7 +271,7 @@ class Config {
     }
     
     const mods = this.config.mods || [];
-    const mod = mods.find(m => m.workshopId === workshopId);
+    const mod = mods.find(m => String(m.workshopId) === String(workshopId));
     if (!mod) {
       return false;
     }
@@ -287,14 +287,14 @@ class Config {
     if (newOrder < oldOrder) {
       // Moving up: shift mods between newOrder and oldOrder down by 1
       mods.forEach(m => {
-        if (m.workshopId !== workshopId && m.loadOrder >= newOrder && m.loadOrder < oldOrder) {
+        if (String(m.workshopId) !== String(workshopId) && m.loadOrder >= newOrder && m.loadOrder < oldOrder) {
           m.loadOrder = (m.loadOrder || 0) + 1;
         }
       });
     } else {
       // Moving down: shift mods between oldOrder and newOrder up by 1
       mods.forEach(m => {
-        if (m.workshopId !== workshopId && m.loadOrder > oldOrder && m.loadOrder <= newOrder) {
+        if (String(m.workshopId) !== String(workshopId) && m.loadOrder > oldOrder && m.loadOrder <= newOrder) {
           m.loadOrder = (m.loadOrder || 0) - 1;
         }
       });
@@ -331,12 +331,12 @@ class Config {
     const mods = this.config.mods || [];
     
     // Validate that all mods in order array exist
-    const validMods = modOrderArray.filter(id => mods.find(m => m.workshopId === id));
+    const validMods = modOrderArray.filter(id => mods.find(m => String(m.workshopId) === String(id)));
     
     if (validMods.length !== mods.length) {
       // Some mods are missing, add them at the end
       mods.forEach(mod => {
-        if (!validMods.includes(mod.workshopId)) {
+        if (!validMods.some(id => String(id) === String(mod.workshopId))) {
           validMods.push(mod.workshopId);
         }
       });
@@ -344,7 +344,7 @@ class Config {
     
     // Assign new load orders
     validMods.forEach((workshopId, index) => {
-      const mod = mods.find(m => m.workshopId === workshopId);
+      const mod = mods.find(m => String(m.workshopId) === String(workshopId));
       if (mod) {
         mod.loadOrder = index + 1;
       }
