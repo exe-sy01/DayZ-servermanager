@@ -2,6 +2,8 @@
 
 A cross-platform Electron desktop application for managing DayZ dedicated servers with SteamCMD integration, workshop mod management, server file updates, config editing, and log viewing.
 
+Think OmegaManager but in an application seems OmegaManager has been discontinued. it works the same without a need for a webUI.
+
 ## Features
 
 - **SteamCMD Integration**: Auto-download and manage SteamCMD
@@ -29,3 +31,11 @@ npm run build
 - Node.js 18+
 - Windows 10+, macOS 10.13+, or Linux
 
+## Disclaimer
+
+This project will be maintained by myself and AI, some of this project is out of my knowledge depth.
+The entire program should be in a working state always, if not open an issue.
+
+
+
+# Pull requests are welcome.
