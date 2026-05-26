@@ -2,17 +2,80 @@ const { spawn, exec } = require('child_process');
 const fs = require('fs-extra');
 const path = require('path');
 const os = require('os');
+const EventEmitter = require('events');
+const config = require('./config');
 
 /**
  * Server process control and monitoring
+ *
+ * Emits:
+ *   'crashed' { code, signal, lifetimeMs, stderrTail, stdoutTail, argv }
  */
-class ServerControl {
+class ServerControl extends EventEmitter {
   constructor() {
+    super();
     this.serverProcess = null;
     this.serverPath = null;
     this.isRunning = false;
     this.monitoringInterval = null;
     this.scheduledRestarts = [];
+    this.autoRestartTimer = null;
+    this.lastStartArgs = null; // remember for auto-restart
+  }
+
+  /**
+   * Build the argv that goes to DayZServer_x64.exe from the persisted
+   * launchConfig plus any renderer-supplied parameters (typically the mod string).
+   *
+   * Dedup rule: anything we set ourselves (config/port/profiles/BEpath/cpuCount
+   * + the five known flags) wins over duplicates coming from either
+   * lc.extraParams or the renderer's extraParameters array.
+   */
+  buildLaunchParams(profileName, extraParameters = []) {
+    const lc = config.getLaunchConfig();
+    const args = [];
+
+    args.push(`-config=${lc.configFile || 'serverDZ.cfg'}`);
+    args.push(`-port=${lc.port || 2302}`);
+    args.push(`-profiles=${profileName || lc.profileName || 'default'}`);
+    if (lc.bePath) args.push(`-BEpath=${lc.bePath}`);
+    if (lc.cpuCount && lc.cpuCount > 0) args.push(`-cpuCount=${lc.cpuCount}`);
+
+    const flags = lc.flags || {};
+    if (flags.doLogs) args.push('-dologs');
+    if (flags.adminLog) args.push('-adminlog');
+    if (flags.netLog) args.push('-netlog');
+    if (flags.freezeCheck) args.push('-freezecheck');
+    if (flags.filePatching) args.push('-filePatching');
+
+    const keysOwned = ['-config=', '-port=', '-profiles=', '-BEpath=', '-cpuCount='];
+    const flagsOwned = new Set(['-dologs', '-adminlog', '-netlog', '-freezecheck', '-filePatching']);
+    const isDuplicate = (p) => {
+      if (!p) return true;
+      if (keysOwned.some(k => p.startsWith(k))) return true;
+      if (flagsOwned.has(p)) return true;
+      return false;
+    };
+
+    // Free-form extra params from the persisted config — same dedup applies.
+    if (lc.extraParams && lc.extraParams.trim()) {
+      const tokens = lc.extraParams.match(/"[^"]+"|\S+/g) || [];
+      for (const t of tokens) {
+        const cleaned = t.replace(/^"|"$/g, '');
+        if (!cleaned.trim() || isDuplicate(cleaned)) continue;
+        args.push(cleaned);
+      }
+    }
+
+    // Renderer-supplied params (mod string and any one-shot additions).
+    for (const raw of (extraParameters || [])) {
+      if (!raw || !String(raw).trim()) continue;
+      const p = String(raw);
+      if (isDuplicate(p)) continue;
+      args.push(p);
+    }
+
+    return args;
   }
 
   /**
@@ -53,32 +116,44 @@ class ServerControl {
         throw new Error(`Server executable not found at: ${serverExe}`);
       }
 
-      // Build command - profiles is always included as a default parameter
-      const defaultParams = [
-        '-config=serverDZ.cfg',
-        `-profiles=${profileName}`,
-        '-dologs',
-        '-adminlog',
-        '-netlog'
-      ];
+      // Build command from persisted launchConfig + renderer-supplied params (typically the mod string)
+      const allParams = this.buildLaunchParams(profileName, parameters);
+      this.lastStartArgs = { serverPath, profileName, parameters };
+      this.lastArgv = [serverExe, ...allParams];
+      this.lastStdoutTail = '';
+      this.lastStderrTail = '';
+      const startedAt = Date.now();
+      this.lastStartedAt = startedAt;
 
-      // Filter out any duplicate -profiles parameter from additional parameters
-      const filteredParams = parameters.filter(param => !param.startsWith('-profiles='));
-      const allParams = [...defaultParams, ...filteredParams];
-      const command = serverExe;
-      const args = allParams;
+      console.log('[server] Spawning:', serverExe);
+      console.log('[server] Args:', JSON.stringify(allParams, null, 2));
 
-      console.log('Starting server:', command, args.join(' '));
+      // Belt-and-braces: kill any orphaned DayZServer_x64.exe that might be
+      // squatting on the port from a prior detached-spawn that lost its handle.
+      if (process.platform === 'win32') {
+        await new Promise((resolve) => {
+          exec('tasklist /FI "IMAGENAME eq DayZServer_x64.exe" /FO CSV /NH', (err, stdout) => {
+            if (err || !stdout || !stdout.includes('DayZServer_x64.exe')) return resolve();
+            console.log('[server] Found orphaned DayZServer_x64.exe — killing it before start');
+            exec('taskkill /IM DayZServer_x64.exe /F /T', () => setTimeout(resolve, 1500));
+          });
+        });
+      }
 
-      // Start server process with error handling
-      let processError = null;
-      
-      this.serverProcess = spawn(command, args, {
+      // Spawn as a real child (NOT detached). The previous detached + windowsHide
+      // + piped-stdio combo on Windows could desync pipes and orphan the process
+      // on Electron exit, leaving DayZServer_x64.exe holding the port. As a child,
+      // pipes are reliable, we capture stderr/stdout for diagnostics, and the
+      // server lifecycle is bound to the manager.
+      const spawnOpts = {
         cwd: serverPath,
-        detached: false,
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: false
-      });
+        shell: false,
+        windowsHide: true
+      };
+
+      let processError = null;
+      this.serverProcess = spawn(serverExe, allParams, spawnOpts);
 
       // Set up error handler immediately
       this.serverProcess.on('error', (error) => {
@@ -115,22 +190,55 @@ class ServerControl {
       this.isRunning = true;
 
       // Handle process events (set up after confirming process started)
+      const TAIL_CAP = 4000;
+      const tailAppend = (current, text) => {
+        const combined = current + text;
+        return combined.length > TAIL_CAP ? combined.slice(-TAIL_CAP) : combined;
+      };
+
       this.serverProcess.stdout.on('data', (data) => {
-        console.log(`Server stdout: ${data}`);
+        const text = data.toString();
+        this.lastStdoutTail = tailAppend(this.lastStdoutTail, text);
+        console.log(`Server stdout: ${text}`);
       });
 
       this.serverProcess.stderr.on('data', (data) => {
-        console.error(`Server stderr: ${data}`);
+        const text = data.toString();
+        this.lastStderrTail = tailAppend(this.lastStderrTail, text);
+        console.error(`Server stderr: ${text}`);
       });
 
-      this.serverProcess.on('close', (code) => {
-        console.log(`Server process exited with code ${code}`);
+      this.serverProcess.on('close', (code, signal) => {
+        const lifetimeMs = Date.now() - startedAt;
+        console.log(`[server] exited code=${code} signal=${signal} lifetime=${lifetimeMs}ms`);
+        const wasRunning = this.isRunning;
         this.isRunning = false;
         this.serverProcess = null;
+
+        // Cancel any pending auto-restart since the process is already gone
+        if (this.autoRestartTimer) { clearTimeout(this.autoRestartTimer); this.autoRestartTimer = null; }
+
+        // Emit a 'crashed' event for the UI when the server dies right after start
+        if (wasRunning && lifetimeMs < 15000) {
+          const stderrTail = (this.lastStderrTail || '').trim();
+          const stdoutTail = (this.lastStdoutTail || '').trim();
+          const argv = this.lastArgv || [];
+          this.emit && this.emit('crashed', {
+            code, signal, lifetimeMs, stderrTail, stdoutTail, argv
+          });
+          // Fallback: also write to electron console
+          console.error('[server] EARLY EXIT — likely bad CLI arg or missing dependency');
+          console.error('  argv:', argv.join(' '));
+          if (stderrTail) console.error('  stderr (tail):\n' + stderrTail);
+          if (stdoutTail) console.error('  stdout (tail):\n' + stdoutTail);
+        }
       });
 
       // Start monitoring
       this.startMonitoring();
+
+      // Auto-restart interval (replaces the timeout/taskkill loop in start.bat)
+      this._scheduleAutoRestart();
 
       return {
         success: true,
@@ -151,6 +259,31 @@ class ServerControl {
     }
   }
 
+  _scheduleAutoRestart() {
+    if (this.autoRestartTimer) {
+      clearTimeout(this.autoRestartTimer);
+      this.autoRestartTimer = null;
+    }
+    const lc = config.getLaunchConfig();
+    const sec = parseInt(lc.autoRestartIntervalSec, 10) || 0;
+    if (sec <= 0 || !this.lastStartArgs) return;
+
+    this.autoRestartTimer = setTimeout(async () => {
+      this.autoRestartTimer = null;
+      if (!this.isRunning) return;
+      try {
+        const args = this.lastStartArgs;
+        console.log(`[auto-restart] interval ${sec}s elapsed, restarting server`);
+        await this.stopServer();
+        // Brief gap so the OS releases ports/handles
+        await new Promise(r => setTimeout(r, 5000));
+        await this.startServer(args.serverPath, args.profileName, args.parameters);
+      } catch (err) {
+        console.error('[auto-restart] failed:', err);
+      }
+    }, sec * 1000);
+  }
+
   /**
    * Stop the server
    */
@@ -159,29 +292,40 @@ class ServerControl {
       throw new Error('Server is not running');
     }
 
+    if (this.autoRestartTimer) {
+      clearTimeout(this.autoRestartTimer);
+      this.autoRestartTimer = null;
+    }
+
+    const pid = this.serverProcess.pid;
+    this.stopMonitoring();
+    this.isRunning = false;
+    this.serverProcess = null;
+
     try {
-      this.stopMonitoring();
-      
-      // Try graceful shutdown first
       if (process.platform === 'win32') {
-        // Windows: Use taskkill
-        exec(`taskkill /PID ${this.serverProcess.pid} /T /F`, (error) => {
-          if (error) {
-            console.error('Error stopping server:', error);
-          }
+        await new Promise((resolve) => {
+          exec(`taskkill /PID ${pid} /T /F`, (error) => {
+            if (error) {
+              console.error('Error stopping server:', error);
+            }
+            resolve();
+          });
         });
       } else {
-        // Linux/Mac: Send SIGTERM then SIGKILL
-        this.serverProcess.kill('SIGTERM');
-        setTimeout(() => {
-          if (this.serverProcess && !this.serverProcess.killed) {
-            this.serverProcess.kill('SIGKILL');
-          }
-        }, 5000);
+        try {
+          process.kill(pid, 'SIGTERM');
+        } catch (e) {
+          // Process may already be gone
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        try {
+          process.kill(pid, 0); // Check if process exists (throws if not)
+          process.kill(pid, 'SIGKILL');
+        } catch (e) {
+          // Process already gone
+        }
       }
-
-      this.isRunning = false;
-      this.serverProcess = null;
 
       return { success: true, message: 'Server stopped successfully' };
     } catch (error) {
@@ -379,14 +523,17 @@ class ServerControl {
 
   /**
    * Schedule a restart
+   * @param {string|Date} time - ISO string or Date
+   * @param {string} repeat - 'once' | 'daily' | 'weekly'
    */
-  scheduleRestart(time, serverPath, profileName, parameters) {
+  scheduleRestart(time, serverPath, profileName, parameters, repeat = 'once') {
     const restart = {
       id: Date.now().toString(),
       time: time,
       serverPath,
       profileName,
       parameters,
+      repeat: repeat || 'once',
       executed: false
     };
 
@@ -415,11 +562,20 @@ class ServerControl {
     const now = new Date();
     
     for (const restart of this.scheduledRestarts) {
-      if (!restart.executed && new Date(restart.time) <= now) {
+      if (restart.executed) continue;
+      const restartTime = new Date(restart.time);
+      if (restartTime > now) continue;
+
+      if (this.isRunning) {
+        await this.restartServer(restart.serverPath, restart.profileName, restart.parameters);
+      }
+
+      if (restart.repeat === 'daily') {
+        restart.time = new Date(restartTime.getTime() + 24 * 60 * 60 * 1000).toISOString();
+      } else if (restart.repeat === 'weekly') {
+        restart.time = new Date(restartTime.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      } else {
         restart.executed = true;
-        if (this.isRunning) {
-          await this.restartServer(restart.serverPath, restart.profileName, restart.parameters);
-        }
       }
     }
   }

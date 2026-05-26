@@ -47,6 +47,13 @@ class ServerPanel {
             });
         }
 
+        const checkUpdatesBtn = document.getElementById('check-server-updates');
+        if (checkUpdatesBtn) {
+            checkUpdatesBtn.addEventListener('click', () => {
+                this.checkForUpdates();
+            });
+        }
+
         if (goToControlBtn) {
             goToControlBtn.addEventListener('click', () => {
                 window.app.switchPanel('servers');
@@ -63,6 +70,26 @@ class ServerPanel {
             }
         } catch (error) {
             window.app.showError(`Failed to select server path: ${error.message}`);
+        }
+    }
+
+    async checkForUpdates() {
+        try {
+            const path = this.serverPath || await window.electronAPI.configGetServerPath();
+            if (!path) {
+                window.app.showError('Please set server path first');
+                return;
+            }
+            const result = await window.electronAPI.serverCheckUpdates(path);
+            if (result.updateAvailable) {
+                window.app.showError(`Server update available (Build ${result.requiredBuildId || '?'}). Use Update Server to install.`);
+            } else if (result.success) {
+                window.app.showSuccess('Server is up to date');
+            } else {
+                window.app.showError(result.error || result.message || 'Check failed');
+            }
+        } catch (error) {
+            window.app.showError(`Update check failed: ${error.message}`);
         }
     }
 
@@ -91,6 +118,16 @@ class ServerPanel {
                 const goToControlBtn = document.getElementById('go-to-server-control');
                 if (goToControlBtn) {
                     goToControlBtn.disabled = !isValid;
+                }
+
+                // Check for updates on startup if preference enabled
+                const cfg = await window.electronAPI.configGet();
+                if (cfg?.preferences?.checkUpdatesOnStart && window.electronAPI.serverCheckUpdates) {
+                    window.electronAPI.serverCheckUpdates(this.serverPath).then(r => {
+                        if (r?.updateAvailable && window.notificationPanel) {
+                            window.notificationPanel.load();
+                        }
+                    }).catch(() => {});
                 }
             } else {
                 document.getElementById('server-path').textContent = 'Not set';

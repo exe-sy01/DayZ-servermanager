@@ -430,31 +430,213 @@ class WorkshopManager {
   }
 
   /**
-   * Update all mods in list
+   * Fetch published file details for many workshop IDs in one Steam API call.
+   * Returns Map<workshopId, { title, timeUpdated, fileSize, visibility }>.
+   * No API key required; uses public ISteamRemoteStorage endpoint.
+   */
+  async getPublishedFileDetails(workshopIds) {
+    const ids = workshopIds.map(String).filter(Boolean);
+    if (ids.length === 0) return new Map();
+
+    const out = new Map();
+    const CHUNK = 100;
+
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const params = new URLSearchParams();
+      params.append('itemcount', String(chunk.length));
+      chunk.forEach((id, idx) => params.append(`publishedfileids[${idx}]`, id));
+
+      const response = await axios.post(
+        'https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/',
+        params.toString(),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 15000
+        }
+      );
+
+      const files = response.data?.response?.publishedfiledetails || [];
+      for (const f of files) {
+        if (!f || !f.publishedfileid) continue;
+        out.set(String(f.publishedfileid), {
+          title: f.title || null,
+          timeUpdated: f.time_updated ? f.time_updated * 1000 : null,
+          fileSize: f.file_size ? parseInt(f.file_size, 10) : null,
+          visibility: f.visibility,
+          result: f.result // 1 = OK, 9 = banned/missing
+        });
+      }
+    }
+
+    return out;
+  }
+
+  /**
+   * Compare each installed mod's local mtime vs Steam's time_updated.
+   * Returns an array of update-status records.
+   */
+  async checkModsForUpdates(installPath, modsList = null) {
+    // Discover installed mods if none provided
+    let mods = modsList;
+    if (!mods) {
+      mods = await this.listInstalledMods(installPath);
+    }
+    mods = (mods || []).filter(m => m && m.workshopId && !m.isLocal);
+
+    if (mods.length === 0) return [];
+
+    const ids = mods.map(m => String(m.workshopId));
+    let remoteMap;
+    try {
+      remoteMap = await this.getPublishedFileDetails(ids);
+    } catch (error) {
+      throw new Error(`Failed to query Steam Workshop: ${error.message}`);
+    }
+
+    const results = [];
+    for (const mod of mods) {
+      const id = String(mod.workshopId);
+      const remote = remoteMap.get(id);
+      const workshopModPath = path.join(installPath, 'steamapps', 'workshop', 'content', this.workshopAppId, id);
+
+      let localTime = null;
+      let installed = false;
+      try {
+        if (await fs.pathExists(workshopModPath)) {
+          installed = true;
+          // Use the newest mtime of any file in the mod folder (top-level) as the local timestamp
+          const entries = await fs.readdir(workshopModPath);
+          let newest = (await fs.stat(workshopModPath)).mtimeMs;
+          for (const entry of entries) {
+            try {
+              const s = await fs.stat(path.join(workshopModPath, entry));
+              if (s.mtimeMs > newest) newest = s.mtimeMs;
+            } catch (_) {}
+          }
+          localTime = newest;
+        }
+      } catch (_) {}
+
+      let status = 'unknown';
+      let hasUpdate = false;
+      let error = null;
+
+      if (!remote) {
+        status = 'not-found';
+        error = 'Not on Steam Workshop (removed or private)';
+      } else if (remote.result && remote.result !== 1) {
+        status = 'unavailable';
+        error = `Workshop item result code ${remote.result}`;
+      } else if (!installed) {
+        status = 'missing';
+        hasUpdate = true;
+      } else if (!remote.timeUpdated || !localTime) {
+        status = 'unknown';
+      } else if (remote.timeUpdated > localTime + 60_000) {
+        // 60s buffer to ignore symlink/copy timestamp jitter
+        status = 'update-available';
+        hasUpdate = true;
+      } else {
+        status = 'up-to-date';
+      }
+
+      results.push({
+        workshopId: id,
+        name: mod.name || remote?.title || id,
+        remoteTitle: remote?.title || null,
+        localTime,
+        remoteTime: remote?.timeUpdated || null,
+        fileSize: remote?.fileSize || null,
+        installed,
+        hasUpdate,
+        status,
+        error
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Update all mods in list — batched into a single SteamCMD invocation
+   * to avoid per-mod login/startup overhead.
    */
   async updateAllMods(modsList, installPath, onProgress = null) {
-    const results = [];
     const total = modsList.length;
+    if (total === 0) return [];
 
+    if (!await steamcmd.isInstalled()) {
+      throw new Error('SteamCMD is not installed. Please download it first.');
+    }
+    await fs.ensureDir(installPath);
+
+    const ids = modsList.map(m => String(m.workshopId)).filter(Boolean);
+
+    // Remove existing @ModName links so downloadMod-style post-processing can recreate them.
+    for (const mod of modsList) {
+      try {
+        const modName = await this.getModFolderName(mod.workshopId, installPath);
+        if (modName) {
+          const serverModPath = path.join(installPath, `@${modName}`);
+          if (await fs.pathExists(serverModPath)) {
+            const stats = await fs.lstat(serverModPath);
+            if (stats.isSymbolicLink() || stats.isFile() || stats.isDirectory()) {
+              await fs.remove(serverModPath);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (onProgress) {
+      onProgress({ current: 0, total, message: `Starting batch download of ${total} mod(s)...` });
+    }
+
+    // One SteamCMD process for the whole batch
+    try {
+      await steamcmd.downloadWorkshopItems(ids, installPath, (p) => {
+        if (onProgress) onProgress({ ...p, total });
+      });
+    } catch (error) {
+      // Continue to post-processing even on partial failure so successful mods get linked
+      console.warn('Batch SteamCMD reported error, will validate per-mod:', error.message);
+    }
+
+    // Per-mod post-processing: verify, relink, copy keys
+    const results = [];
     for (let i = 0; i < modsList.length; i++) {
       const mod = modsList[i];
-      try {
-        if (onProgress) {
-          onProgress({ 
-            current: i + 1, 
-            total, 
-            mod: mod.name || mod.workshopId,
-            message: `Updating ${mod.name || mod.workshopId}...`
-          });
-        }
-        const result = await this.updateMod(mod.workshopId, installPath);
-        results.push({ ...result, mod });
-      } catch (error) {
-        results.push({ 
-          success: false, 
-          error: error.message, 
-          mod 
+      const id = String(mod.workshopId);
+      if (onProgress) {
+        onProgress({
+          current: i + 1,
+          total,
+          mod: mod.name || id,
+          message: `Linking ${mod.name || id}...`
         });
+      }
+      try {
+        const workshopModPath = path.join(installPath, 'steamapps', 'workshop', 'content', this.workshopAppId, id);
+        if (!await fs.pathExists(workshopModPath)) {
+          throw new Error('Mod files not found after download');
+        }
+        const modName = await this.getModFolderName(id, installPath);
+        const serverModPath = path.join(installPath, `@${modName}`);
+        const keysPath = path.join(installPath, 'keys');
+
+        if (!await fs.pathExists(serverModPath)) {
+          try {
+            await fs.ensureSymlink(workshopModPath, serverModPath, process.platform === 'win32' ? 'junction' : 'dir');
+          } catch (symErr) {
+            await fs.copy(workshopModPath, serverModPath);
+          }
+        }
+        await this.copyModKeys(workshopModPath, keysPath);
+
+        results.push({ success: true, workshopId: id, modName, path: serverModPath, mod });
+      } catch (error) {
+        results.push({ success: false, workshopId: id, error: error.message, mod });
       }
     }
 
@@ -739,8 +921,17 @@ class WorkshopManager {
                 }
               }
               
-              // If we found a workshop ID and don't already have this mod in the list
-              if (workshopId && !mods.find(m => String(m.workshopId) === String(workshopId))) {
+              // Local mods: no workshop ID (folder not from workshop)
+              if (!workshopId && !mods.find(m => m.isLocal && m.modName === modName)) {
+                mods.push({
+                  isLocal: true,
+                  modName: modName,
+                  name: modName,
+                  workshopId: null,
+                  serverModPath: modFolderPath,
+                  installed: true
+                });
+              } else if (workshopId && !mods.find(m => String(m.workshopId) === String(workshopId))) {
                 const modInfo = await this.getModInfo(workshopId, installPath);
                 if (modInfo) {
                   mods.push({

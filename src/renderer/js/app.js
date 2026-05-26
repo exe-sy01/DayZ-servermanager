@@ -161,6 +161,9 @@ class App {
             if (!window.sidebarProgress) {
                 window.sidebarProgress = new SidebarProgress();
             }
+            if (!window.notificationPanel) {
+                window.notificationPanel = new NotificationPanel();
+            }
 
             window.electronAPI.onProgress('steamcmd:download-progress', (event, data) => {
                 console.log('SteamCMD download progress:', data);
@@ -285,7 +288,7 @@ class App {
             const status = await window.electronAPI.serverControlGetStatus();
             const statusBadge = document.getElementById('topbar-server-status');
             if (statusBadge) {
-                if (status && status.running) {
+                if (status && status.isRunning) {
                     statusBadge.textContent = 'Online';
                     statusBadge.className = 'status-badge status-success';
                 } else {
@@ -296,7 +299,7 @@ class App {
 
             // Update player count
             const playerCountEl = document.getElementById('topbar-player-count');
-            if (playerCountEl && status && status.running) {
+            if (playerCountEl && status && status.isRunning) {
                 try {
                     const serverPath = await window.electronAPI.configGetServerPath();
                     const playerCount = await window.electronAPI.serverControlGetPlayerCount(serverPath, 'default');
@@ -324,10 +327,18 @@ class App {
                 document.getElementById('check-updates').checked = config.preferences?.checkUpdatesOnStart !== false;
             }
 
+            // Load Steam API config
+            const steamApi = await window.electronAPI.configGetSteamApi();
+            if (steamApi) {
+                const apiCheckbox = document.getElementById('steam-api-enabled');
+                const apiKeyInput = document.getElementById('steam-api-key');
+                if (apiCheckbox) apiCheckbox.checked = steamApi.enabled || false;
+                if (apiKeyInput) apiKeyInput.value = steamApi.apiKey || '';
+            }
+
             // Load Steam credentials
             const credentials = await window.electronAPI.configGetSteamCredentials();
             if (credentials) {
-                document.getElementById('use-steam-credentials').checked = credentials.useCredentials || false;
                 document.getElementById('steam-username').value = credentials.username || '';
                 document.getElementById('steam-password').value = credentials.password || '';
             }
@@ -372,9 +383,10 @@ class App {
             const serverPath = document.getElementById('settings-server-path').value;
             const autoUpdate = document.getElementById('auto-update').checked;
             const checkUpdates = document.getElementById('check-updates').checked;
-            const useCredentials = document.getElementById('use-steam-credentials').checked;
             const steamUsername = document.getElementById('steam-username').value;
             const steamPassword = document.getElementById('steam-password').value;
+            const steamApiEnabled = document.getElementById('steam-api-enabled')?.checked || false;
+            const steamApiKey = document.getElementById('steam-api-key')?.value || '';
 
             if (serverPath) {
                 await window.electronAPI.configSetServerPath(serverPath);
@@ -388,12 +400,11 @@ class App {
             };
             await window.electronAPI.configSet('preferences', config.preferences);
 
-            // Save Steam credentials
-            await window.electronAPI.configSetSteamCredentials(
-                steamUsername,
-                steamPassword,
-                useCredentials
-            );
+            // Save Steam credentials (required for DayZ)
+            await window.electronAPI.configSetSteamCredentials(steamUsername, steamPassword);
+
+            // Save Steam API config
+            await window.electronAPI.configSetSteamApi(steamApiEnabled, steamApiKey);
 
             this.showSuccess('Settings saved successfully');
         } catch (error) {

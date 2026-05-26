@@ -5,7 +5,13 @@ class ModPanel {
     constructor() {
         this.mods = [];
         this.serverPath = null;
+        this.filterQuery = '';
+        this.selectedModIds = new Set();
         this.init();
+    }
+
+    getModId(mod) {
+        return mod.isLocal ? `local:${mod.modName}` : String(mod.workshopId);
     }
 
     init() {
@@ -22,8 +28,28 @@ class ModPanel {
             this.updateAllMods();
         });
 
+        document.getElementById('check-mod-updates').addEventListener('click', () => {
+            this.openUpdateCheckModal();
+        });
+
+        document.getElementById('close-mod-updates').addEventListener('click', () => {
+            this.closeUpdateCheckModal();
+        });
+
+        document.getElementById('mod-updates-recheck').addEventListener('click', () => {
+            this.runUpdateCheck();
+        });
+
+        document.getElementById('mod-updates-apply').addEventListener('click', () => {
+            this.applySelectedUpdates();
+        });
+
+        document.getElementById('mod-updates-select-all').addEventListener('change', (e) => {
+            this.toggleAllUpdateSelections(e.target.checked);
+        });
+
         document.getElementById('refresh-mods').addEventListener('click', () => {
-            this.loadMods();
+            this.loadMods(true);
         });
 
         // Add mod modal
@@ -43,12 +69,63 @@ class ModPanel {
             this.scanWorkshopFolder();
         });
 
+        const scanLocalModsBtn = document.getElementById('scan-local-mods');
+        if (scanLocalModsBtn) {
+            scanLocalModsBtn.addEventListener('click', () => this.scanLocalMods());
+        }
+
         document.getElementById('export-modlist').addEventListener('click', () => {
             this.exportModlist();
         });
+
+        const checkDepsBtn = document.getElementById('check-dependencies');
+        if (checkDepsBtn) {
+            checkDepsBtn.addEventListener('click', () => {
+                this.checkDependencies();
+            });
+        }
+
+        const filterInput = document.getElementById('mods-filter-input');
+        if (filterInput) {
+            filterInput.addEventListener('input', () => {
+                this.filterQuery = (filterInput.value || '').trim();
+                this.renderMods();
+                this.setupDragAndDrop();
+                this.setupContextMenu();
+                this.setupBulkListeners();
+            });
+        }
+
+        const selectAllBtn = document.getElementById('mods-select-all');
+        if (selectAllBtn) selectAllBtn.addEventListener('click', () => this.selectAllVisible());
+        const clearSelBtn = document.getElementById('mods-clear-selection');
+        if (clearSelBtn) clearSelBtn.addEventListener('click', () => this.clearSelection());
+        const removeSelBtn = document.getElementById('mods-remove-selected');
+        if (removeSelBtn) removeSelBtn.addEventListener('click', () => this.bulkRemoveSelected());
     }
 
-    async loadMods() {
+    async checkDependencies() {
+        try {
+            const serverPath = await window.electronAPI.configGetServerPath();
+            if (!serverPath) {
+                window.app?.showError('Please set server path in Settings');
+                return;
+            }
+            const result = await window.electronAPI.modsCheckDependencies(serverPath);
+            if (result.valid) {
+                window.app?.showSuccess('All mod dependencies are satisfied');
+            } else if (result.violations && result.violations.length > 0) {
+                const msg = result.violations.map(v => v.message).join('\n');
+                alert('Dependency violations found:\n\n' + msg + '\n\nMove required mods higher in load order.');
+            } else {
+                window.app?.showSuccess('No dependency issues found');
+            }
+        } catch (error) {
+            window.app?.showError(`Dependency check failed: ${error.message}`);
+        }
+    }
+
+    async loadMods(userRefreshed = false) {
         try {
             this.serverPath = await window.electronAPI.configGetServerPath();
             
@@ -72,38 +149,44 @@ class ModPanel {
             
             // Only show mods that are in the config
             this.mods = await Promise.all(configMods.map(async (configMod) => {
-                // Find matching installed mod by workshop ID
+                // Local mods (not from Workshop)
+                if (configMod.isLocal && configMod.modName) {
+                    const installedMod = installedMods.find(im => im.isLocal && im.modName === configMod.modName);
+                    return {
+                        ...(installedMod || {}),
+                        isLocal: true,
+                        modName: configMod.modName,
+                        name: configMod.name || configMod.modName,
+                        workshopId: null,
+                        loadOrder: configMod.loadOrder || 999999,
+                        installed: !!installedMod
+                    };
+                }
+
+                // Workshop mods
                 const installedMod = installedMods.find(im => 
-                    im.workshopId === configMod.workshopId || 
-                    im.workshopId === configMod.workshopId?.toString() ||
-                    String(im.workshopId) === String(configMod.workshopId)
+                    !im.isLocal && (
+                        im.workshopId === configMod.workshopId || 
+                        im.workshopId === configMod.workshopId?.toString() ||
+                        String(im.workshopId) === String(configMod.workshopId)
+                    )
                 );
-                
-                // Use modName from installed mod if available, otherwise use name from config
                 let modName = configMod.name;
                 let modNameFromInfo = installedMod?.modName;
                 
-                // If we have an installed mod, use its info
                 if (installedMod) {
                     return {
                         ...installedMod,
                         name: modName || installedMod.name || `Mod ${configMod.workshopId}`,
                         modName: modNameFromInfo || modName?.replace(/@/g, '').replace(/[^a-zA-Z0-9_-]/g, '') || `Mod${configMod.workshopId}`,
                         workshopId: configMod.workshopId,
-                        loadOrder: configMod.loadOrder || 999999, // Include loadOrder from config
-                        installed: true // Mark as installed if found in installedMods
+                        loadOrder: configMod.loadOrder || 999999,
+                        installed: true
                     };
                 } else {
-                    // Check if @ModName folder exists in server directory (for scanned mods)
-                    // Try to determine modName from config name
-                    let potentialModName = modName?.replace(/@/g, '').replace(/[^a-zA-Z0-9_-]/g, '') || `Mod${configMod.workshopId}`;
-                    const serverModPath = `@${potentialModName}`;
-                    
-                    // Try to check if the folder exists (we'll use a simple approach - check via getInfo)
                     try {
                         const modInfo = await window.electronAPI.workshopGetInfo(configMod.workshopId, this.serverPath);
                         if (modInfo && modInfo.serverModPath) {
-                            // Mod folder exists in server directory
                             return {
                                 ...modInfo,
                                 name: modName || modInfo.name || `Mod ${configMod.workshopId}`,
@@ -124,7 +207,6 @@ class ModPanel {
                         console.warn(`Could not get info for mod ${configMod.workshopId}:`, error);
                     }
                     
-                    // Fallback: just show what we have from config
                     return {
                         workshopId: configMod.workshopId,
                         name: modName || `Mod ${configMod.workshopId}`,
@@ -148,50 +230,156 @@ class ModPanel {
             this.renderMods();
             this.setupDragAndDrop();
             this.setupContextMenu();
+
+            if (userRefreshed && this.mods.length > 0) {
+                const updateBtn = document.getElementById('update-all-mods');
+                if (updateBtn) updateBtn.style.display = '';
+            }
         } catch (error) {
             console.error('Error loading mods:', error);
             window.app.showError(`Failed to load mods: ${error.message}`);
         }
     }
 
+    getFilteredMods() {
+        const q = this.filterQuery.toLowerCase();
+        if (!q) return this.mods;
+        return this.mods.filter(mod => {
+            const name = (mod.name || mod.modName || '').toLowerCase();
+            const id = (mod.workshopId != null ? String(mod.workshopId) : '').toLowerCase();
+            const atName = (mod.modName ? `@${mod.modName}` : '').toLowerCase();
+            return name.includes(q) || id.includes(q) || atName.includes(q);
+        });
+    }
+
     renderMods() {
         const container = document.getElementById('mods-list');
         const counter = document.getElementById('mod-counter');
-        
-        // Update counter
+        const filterHint = document.getElementById('mods-filter-hint');
+        const bulkBar = document.getElementById('mods-bulk-bar');
+        const selectedCountEl = document.getElementById('mods-selected-count');
+
         const totalMods = this.mods.length;
         const installedMods = this.mods.filter(mod => mod.installed !== false).length;
         if (counter) {
             counter.textContent = `${totalMods} mod${totalMods !== 1 ? 's' : ''} (${installedMods} installed)`;
         }
-        
+
+        if (filterHint) {
+            if (this.filterQuery) {
+                const filtered = this.getFilteredMods();
+                filterHint.textContent = `Showing ${filtered.length} of ${totalMods} mods`;
+                filterHint.style.display = '';
+            } else {
+                filterHint.textContent = '';
+                filterHint.style.display = 'none';
+            }
+        }
+
+        if (bulkBar) {
+            bulkBar.style.display = this.mods.length > 0 ? '' : 'none';
+        }
+        if (selectedCountEl) {
+            selectedCountEl.textContent = this.selectedModIds.size;
+        }
+        const showRemoveSelected = this.selectedModIds.size > 0;
+        const removeSelectedBtn = document.getElementById('mods-remove-selected');
+        if (removeSelectedBtn) removeSelectedBtn.style.display = showRemoveSelected ? '' : 'none';
+
         if (this.mods.length === 0) {
             container.innerHTML = '<div class="empty-state">No mods installed</div>';
             return;
         }
 
-        // Mods are already sorted by loadOrder in loadMods()
-        container.innerHTML = this.mods.map((mod, index) => {
+        const toRender = this.getFilteredMods();
+        if (toRender.length === 0) {
+            container.innerHTML = '<div class="empty-state">No mods match the filter</div>';
+            return;
+        }
+
+        // Build rows from filtered list; each mod's loadOrder/index is from full list
+        container.innerHTML = toRender.map((mod, visibleIndex) => {
+            const fullIndex = this.mods.indexOf(mod);
             const isInstalled = mod.installed !== false;
             const statusClass = isInstalled ? 'installed' : 'not-installed';
             const statusText = isInstalled ? 'Installed' : 'Not Installed';
-            const loadOrder = mod.loadOrder || (index + 1);
-            
+            const loadOrder = mod.loadOrder || (fullIndex + 1);
+            const modId = this.getModId(mod);
+            const displayName = mod.name || (mod.isLocal ? mod.modName : `Mod ${mod.workshopId}`);
+            const idLabel = mod.isLocal ? `@${mod.modName}` : `Workshop ID: ${mod.workshopId}`;
+            const updateBtn = (!mod.isLocal && isInstalled) ? `<button class="btn btn-secondary btn-sm" onclick="window.modPanel.updateMod('${mod.workshopId}')">Update</button>` : '';
+            const checked = this.selectedModIds.has(modId) ? ' checked' : '';
+
             return `
-            <div class="mod-item" draggable="true" data-workshop-id="${mod.workshopId}" data-load-order="${loadOrder}">
+            <div class="mod-item" draggable="true" data-mod-id="${this.escapeHtml(modId)}" data-workshop-id="${mod.workshopId || ''}" data-load-order="${loadOrder}">
+                <div class="mod-item-checkbox"><input type="checkbox" class="mod-select-cb" data-mod-id="${this.escapeHtml(modId)}"${checked}></div>
                 <div class="mod-load-order-number">${loadOrder}</div>
                 <div class="mod-item-info">
-                    <div class="mod-item-name">${this.escapeHtml(mod.name || `Mod ${mod.workshopId}`)}</div>
-                    <div class="mod-item-id">Workshop ID: ${mod.workshopId}</div>
+                    <div class="mod-item-name">${this.escapeHtml(displayName)}${mod.isLocal ? ' <span class="mod-badge local">Local</span>' : ''}</div>
+                    <div class="mod-item-id">${idLabel}</div>
                 </div>
                 <div class="mod-actions">
                     <span class="mod-status ${statusClass}">${statusText}</span>
-                    ${isInstalled ? `<button class="btn btn-secondary btn-sm" onclick="window.modPanel.updateMod('${mod.workshopId}')">Update</button>` : ''}
-                    <button class="btn btn-secondary btn-sm" onclick="window.modPanel.removeMod('${mod.workshopId}')">Remove</button>
+                    ${updateBtn}
+                    <button class="btn btn-secondary btn-sm" onclick="window.modPanel.removeMod('${this.escapeHtml(modId)}')">Remove</button>
                 </div>
             </div>
         `;
         }).join('');
+
+        this.setupBulkListeners();
+    }
+
+    setupBulkListeners() {
+        const container = document.getElementById('mods-list');
+        if (!container) return;
+        container.querySelectorAll('.mod-select-cb').forEach(cb => {
+            cb.replaceWith(cb.cloneNode(true));
+        });
+        container.querySelectorAll('.mod-select-cb').forEach(cb => {
+            cb.addEventListener('change', (e) => {
+                const id = e.target.getAttribute('data-mod-id');
+                if (e.target.checked) this.selectedModIds.add(id);
+                else this.selectedModIds.delete(id);
+                const countEl = document.getElementById('mods-selected-count');
+                if (countEl) countEl.textContent = this.selectedModIds.size;
+                const removeBtn = document.getElementById('mods-remove-selected');
+                if (removeBtn) removeBtn.style.display = this.selectedModIds.size > 0 ? '' : 'none';
+            });
+        });
+    }
+
+    selectAllVisible() {
+        this.getFilteredMods().forEach(mod => this.selectedModIds.add(this.getModId(mod)));
+        this.renderMods();
+    }
+
+    clearSelection() {
+        this.selectedModIds.clear();
+        this.renderMods();
+    }
+
+    async bulkRemoveSelected() {
+        const n = this.selectedModIds.size;
+        if (n === 0) return;
+        const msg = `Remove ${n} mod(s) from the list? Workshop mods will have their @ folder and keys removed; local mods are only removed from the list.`;
+        if (!confirm(msg)) return;
+
+        const ids = Array.from(this.selectedModIds);
+        let removed = 0;
+        for (const modId of ids) {
+            try {
+                await this.removeMod(modId, true);
+                removed++;
+            } catch (err) {
+                console.warn('Bulk remove failed for', modId, err);
+            }
+        }
+        this.selectedModIds.clear();
+        await this.loadMods();
+        if (removed > 0) {
+            window.app.showSuccess(removed < ids.length ? `Removed ${removed} of ${ids.length} mod(s)` : `Removed ${removed} mod(s) successfully`);
+        }
     }
 
     escapeHtml(text) {
@@ -259,31 +447,37 @@ class ModPanel {
 
             const modItem = e.target.closest('.mod-item');
             if (modItem && modItem !== draggedElement) {
-                const dropIndex = Array.from(newContainer.children).indexOf(modItem);
+                const draggedId = draggedElement.getAttribute('data-mod-id');
+                const dropTargetId = modItem.getAttribute('data-mod-id');
                 const rect = modItem.getBoundingClientRect();
                 const midpoint = rect.top + rect.height / 2;
                 const insertAfter = e.clientY > midpoint;
 
-                const targetIndex = insertAfter ? dropIndex + 1 : dropIndex;
-                const finalIndex = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex;
-                
-                // Get new order array
-                const modOrder = Array.from(newContainer.children)
-                    .map(child => child.getAttribute('data-workshop-id'))
-                    .filter(id => id);
-                
-                // Remove dragged element from array
-                const draggedId = draggedElement.getAttribute('data-workshop-id');
-                modOrder.splice(draggedIndex, 1);
-                
-                // Insert at new position
-                modOrder.splice(finalIndex, 0, draggedId);
-                
-                // Update load order
+                let modOrder;
+                if (this.filterQuery) {
+                    // Filtered view: compute full list order with dragged mod moved relative to drop target
+                    modOrder = this.mods.map(m => this.getModId(m));
+                    const fromIdx = modOrder.indexOf(draggedId);
+                    let toIdx = modOrder.indexOf(dropTargetId);
+                    if (insertAfter) toIdx += 1;
+                    if (fromIdx === -1 || toIdx === -1) return;
+                    modOrder.splice(fromIdx, 1);
+                    const newToIdx = modOrder.indexOf(dropTargetId) + (insertAfter ? 1 : 0);
+                    modOrder.splice(newToIdx, 0, draggedId);
+                } else {
+                    const dropIndex = Array.from(newContainer.children).indexOf(modItem);
+                    const targetIndex = insertAfter ? dropIndex + 1 : dropIndex;
+                    const finalIndex = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex;
+                    modOrder = Array.from(newContainer.children)
+                        .map(child => child.getAttribute('data-mod-id'))
+                        .filter(id => id);
+                    modOrder.splice(draggedIndex, 1);
+                    modOrder.splice(finalIndex, 0, draggedId);
+                }
+
                 await this.reorderMods(modOrder);
             }
 
-            // Cleanup
             newContainer.querySelectorAll('.mod-item').forEach(item => {
                 item.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom');
             });
@@ -325,12 +519,12 @@ class ModPanel {
 
         let currentModWorkshopId = null;
 
-        // Right-click handler
+        // Right-click handler (data-mod-id = workshopId or "local:ModName")
         container.addEventListener('contextmenu', (e) => {
             const modItem = e.target.closest('.mod-item');
             if (modItem) {
                 e.preventDefault();
-                currentModWorkshopId = modItem.getAttribute('data-workshop-id');
+                currentModWorkshopId = modItem.getAttribute('data-mod-id');
                 
                 const rect = modItem.getBoundingClientRect();
                 contextMenu.style.display = 'block';
@@ -344,11 +538,13 @@ class ModPanel {
             contextMenu.style.display = 'none';
         });
 
-        // Set load order handler
+        // Set load order handler (currentModWorkshopId can be workshopId or "local:ModName")
         document.getElementById('set-load-order-item').addEventListener('click', async () => {
             if (!currentModWorkshopId) return;
             
-            const mod = this.mods.find(m => String(m.workshopId) === String(currentModWorkshopId));
+            const mod = this.mods.find(m => 
+                m.isLocal ? `local:${m.modName}` === currentModWorkshopId : String(m.workshopId) === String(currentModWorkshopId)
+            );
             if (!mod) return;
 
             const currentOrder = mod.loadOrder || this.mods.length;
@@ -581,38 +777,90 @@ class ModPanel {
         }
     }
 
-    async removeMod(workshopId) {
-        const mod = this.mods.find(m => m.workshopId === workshopId || String(m.workshopId) === String(workshopId));
-        const modName = mod?.name || mod?.modName || workshopId;
-        
-        const confirmed = confirm(`Remove mod "${modName}" (${workshopId})? This will remove it from the list and delete the @ModName folder and keys. The workshop files will remain.`);
-        if (!confirmed) return;
+    async removeMod(modId, silent = false) {
+        const mod = this.mods.find(m => 
+            m.isLocal ? `local:${m.modName}` === modId : String(m.workshopId) === String(modId)
+        );
+        const displayName = mod?.name || mod?.modName || modId;
+        const isLocal = String(modId).startsWith('local:');
+
+        if (!silent) {
+            const confirmMsg = isLocal
+                ? `Remove local mod "${displayName}" from the list? (The @${mod?.modName || modId.replace(/^local:/, '')} folder will not be deleted.)`
+                : `Remove mod "${displayName}" (${modId})? This will remove it from the list and delete the @ModName folder and keys. The workshop files will remain.`;
+            if (!confirm(confirmMsg)) return;
+        }
 
         try {
             if (!this.serverPath) {
                 this.serverPath = await window.electronAPI.configGetServerPath();
             }
 
-            // Remove from config
-            await window.electronAPI.configRemoveMod(workshopId);
-
-            // Remove @ModName folder (symlink or copy) and keys from server directory
-            if (this.serverPath && mod?.modName) {
-                try {
-                    const result = await window.electronAPI.removeModFolder(this.serverPath, mod.modName);
-                    if (!result.success) {
-                        console.warn('Could not remove mod folder:', result.error);
+            if (isLocal) {
+                const modName = String(modId).replace(/^local:/, '');
+                await window.electronAPI.configRemoveLocalMod(modName);
+            } else {
+                await window.electronAPI.configRemoveMod(modId);
+                if (this.serverPath && mod?.modName) {
+                    try {
+                        const result = await window.electronAPI.removeModFolder(this.serverPath, mod.modName);
+                        if (!result.success) {
+                            console.warn('Could not remove mod folder:', result.error);
+                        }
+                    } catch (error) {
+                        console.warn('Could not remove mod folder:', error);
                     }
-                } catch (error) {
-                    console.warn('Could not remove mod folder:', error);
-                    // Continue anyway
                 }
             }
 
-            window.app.showSuccess('Mod removed successfully');
-            await this.loadMods();
+            if (!silent) {
+                window.app.showSuccess('Mod removed successfully');
+                await this.loadMods();
+            }
         } catch (error) {
             window.app.showError(`Failed to remove mod: ${error.message}`);
+        }
+    }
+
+    async scanLocalMods() {
+        try {
+            if (!this.serverPath) {
+                this.serverPath = await window.electronAPI.configGetServerPath();
+            }
+            if (!this.serverPath) {
+                window.app.showError('Please set server installation path first');
+                return;
+            }
+
+            const localMods = await window.electronAPI.workshopListLocalMods(this.serverPath);
+            if (localMods.length === 0) {
+                window.app.showSuccess('No local @ mods found in server directory');
+                return;
+            }
+
+            const configMods = await window.electronAPI.configGet('mods') || [];
+            const existingLocal = new Set(
+                configMods.filter(m => m.isLocal).map(m => m.modName)
+            );
+            let added = 0;
+            for (const mod of localMods) {
+                if (!existingLocal.has(mod.modName)) {
+                    const result = await window.electronAPI.configAddLocalMod(mod.modName, mod.name || mod.modName);
+                    if (result.success) {
+                        added++;
+                        existingLocal.add(mod.modName);
+                    }
+                }
+            }
+
+            if (added > 0) {
+                window.app.showSuccess(`Added ${added} local mod(s) to the list`);
+                await this.loadMods();
+            } else {
+                window.app.showSuccess('All local mods are already in the list');
+            }
+        } catch (error) {
+            window.app.showError(`Failed to scan local mods: ${error.message}`);
         }
     }
 
@@ -647,8 +895,9 @@ class ModPanel {
     }
 
     async updateAllMods() {
-        if (this.mods.length === 0) {
-            window.app.showError('No mods to update');
+        const workshopMods = this.mods.filter(m => !m.isLocal && m.workshopId);
+        if (workshopMods.length === 0) {
+            window.app.showError('No workshop mods to update');
             return;
         }
 
@@ -656,15 +905,15 @@ class ModPanel {
             this.serverPath = await window.electronAPI.configGetServerPath();
         }
 
-        const confirmed = confirm(`Update all ${this.mods.length} mods? This may take a while.`);
+        const confirmed = confirm(`Update all ${workshopMods.length} workshop mod(s)? This may take a while.`);
         if (!confirmed) return;
 
         try {
-            const result = await window.electronAPI.workshopUpdateAll(this.mods, this.serverPath);
+            const result = await window.electronAPI.workshopUpdateAll(workshopMods, this.serverPath);
             
             if (result.success) {
                 const successCount = result.results.filter(r => r.success).length;
-                window.app.showSuccess(`Updated ${successCount} of ${this.mods.length} mods`);
+                window.app.showSuccess(`Updated ${successCount} of ${workshopMods.length} mods`);
                 await this.loadMods();
             } else {
                 window.app.showError(result.error || 'Failed to update mods');
@@ -677,6 +926,170 @@ class ModPanel {
     updateModProgress(data) {
         // Update mod progress if needed
         console.log('Mod progress:', data);
+    }
+
+    async openUpdateCheckModal() {
+        const modal = document.getElementById('mod-updates-modal');
+        modal.classList.add('active');
+        await this.runUpdateCheck();
+    }
+
+    closeUpdateCheckModal() {
+        document.getElementById('mod-updates-modal').classList.remove('active');
+    }
+
+    async runUpdateCheck() {
+        const summary = document.getElementById('mod-updates-summary');
+        const list = document.getElementById('mod-updates-list');
+        const apply = document.getElementById('mod-updates-apply');
+        const selectAll = document.getElementById('mod-updates-select-all');
+
+        apply.disabled = true;
+        apply.textContent = 'Update Selected (0)';
+        selectAll.checked = false;
+        list.innerHTML = '';
+        summary.textContent = 'Checking Steam Workshop…';
+
+        if (!this.serverPath) {
+            this.serverPath = await window.electronAPI.configGetServerPath();
+        }
+
+        const workshopMods = this.mods.filter(m => !m.isLocal && m.workshopId);
+        if (workshopMods.length === 0) {
+            summary.textContent = 'No workshop mods installed.';
+            return;
+        }
+
+        try {
+            const res = await window.electronAPI.workshopCheckUpdates(this.serverPath, workshopMods);
+            if (!res.success) {
+                summary.innerHTML = `<span class="text-error">Check failed: ${res.error}</span>`;
+                return;
+            }
+            this.updateCheckResults = res.results || [];
+            this.renderUpdateCheckResults();
+        } catch (error) {
+            summary.innerHTML = `<span class="text-error">Check failed: ${error.message}</span>`;
+        }
+    }
+
+    renderUpdateCheckResults() {
+        const summary = document.getElementById('mod-updates-summary');
+        const list = document.getElementById('mod-updates-list');
+        const results = this.updateCheckResults || [];
+
+        const upToDate = results.filter(r => r.status === 'up-to-date').length;
+        const needs = results.filter(r => r.hasUpdate).length;
+        const errors = results.filter(r => r.status === 'not-found' || r.status === 'unavailable').length;
+
+        summary.innerHTML = `
+            <span class="upd-tag upd-tag-update">${needs} update${needs === 1 ? '' : 's'} available</span>
+            <span class="upd-tag upd-tag-ok">${upToDate} up to date</span>
+            ${errors ? `<span class="upd-tag upd-tag-err">${errors} unavailable</span>` : ''}
+        `;
+
+        const fmt = (ms) => {
+            if (!ms) return '—';
+            const d = new Date(ms);
+            return d.toLocaleString();
+        };
+
+        const statusLabel = {
+            'update-available': 'UPDATE',
+            'up-to-date': 'CURRENT',
+            'missing': 'MISSING',
+            'not-found': 'GONE',
+            'unavailable': 'ERROR',
+            'unknown': '?'
+        };
+
+        list.innerHTML = results.map(r => `
+            <div class="upd-row status-${r.status}">
+                <label class="upd-check">
+                    <input type="checkbox" data-id="${r.workshopId}" ${r.hasUpdate ? 'checked' : ''} ${r.status === 'not-found' || r.status === 'unavailable' ? 'disabled' : ''}>
+                </label>
+                <div class="upd-name">
+                    <div class="upd-title">${this.escapeHtml(r.name)}</div>
+                    <div class="upd-id">${r.workshopId}</div>
+                </div>
+                <div class="upd-times">
+                    <div><span class="upd-label">LOCAL</span> ${fmt(r.localTime)}</div>
+                    <div><span class="upd-label">STEAM</span> ${fmt(r.remoteTime)}</div>
+                </div>
+                <div class="upd-status">
+                    <span class="upd-badge upd-badge-${r.status}">${statusLabel[r.status] || r.status}</span>
+                    ${r.error ? `<div class="upd-err">${this.escapeHtml(r.error)}</div>` : ''}
+                </div>
+            </div>
+        `).join('');
+
+        list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', () => this.refreshApplyButton());
+        });
+
+        this.refreshApplyButton();
+    }
+
+    escapeHtml(s) {
+        return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    refreshApplyButton() {
+        const apply = document.getElementById('mod-updates-apply');
+        const checked = document.querySelectorAll('#mod-updates-list input[type="checkbox"]:checked');
+        apply.disabled = checked.length === 0;
+        apply.textContent = `Update Selected (${checked.length})`;
+    }
+
+    toggleAllUpdateSelections(on) {
+        const list = document.getElementById('mod-updates-list');
+        list.querySelectorAll('input[type="checkbox"]:not(:disabled)').forEach(cb => {
+            const row = cb.closest('.upd-row');
+            if (on) {
+                // Only re-check rows that actually have updates if user is selecting all
+                if (row && row.classList.contains('status-update-available')) cb.checked = true;
+                if (row && row.classList.contains('status-missing')) cb.checked = true;
+            } else {
+                cb.checked = false;
+            }
+        });
+        this.refreshApplyButton();
+    }
+
+    async applySelectedUpdates() {
+        const checked = Array.from(document.querySelectorAll('#mod-updates-list input[type="checkbox"]:checked'));
+        if (checked.length === 0) return;
+
+        const ids = new Set(checked.map(c => c.dataset.id));
+        const modsToUpdate = (this.updateCheckResults || [])
+            .filter(r => ids.has(r.workshopId))
+            .map(r => ({ workshopId: r.workshopId, name: r.name }));
+
+        if (!this.serverPath) {
+            this.serverPath = await window.electronAPI.configGetServerPath();
+        }
+
+        const apply = document.getElementById('mod-updates-apply');
+        apply.disabled = true;
+        apply.textContent = `Updating ${modsToUpdate.length}…`;
+
+        try {
+            const result = await window.electronAPI.workshopUpdateAll(modsToUpdate, this.serverPath);
+            if (result.success) {
+                const ok = (result.results || []).filter(r => r.success).length;
+                window.app.showSuccess(`Updated ${ok} of ${modsToUpdate.length} mod${modsToUpdate.length === 1 ? '' : 's'}`);
+                this.closeUpdateCheckModal();
+                await this.loadMods();
+            } else {
+                window.app.showError(result.error || 'Update failed');
+                apply.disabled = false;
+                this.refreshApplyButton();
+            }
+        } catch (error) {
+            window.app.showError(`Update failed: ${error.message}`);
+            apply.disabled = false;
+            this.refreshApplyButton();
+        }
     }
 
     async exportModlist() {

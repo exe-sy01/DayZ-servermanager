@@ -171,6 +171,60 @@ class ConfigEditor {
   }
 
   /**
+   * Read the current `hostname` value from a DayZ server config (.cfg).
+   * Returns null if file is missing or no hostname line is present.
+   */
+  async getHostname(serverPath, configFile = 'serverDZ.cfg') {
+    try {
+      if (!serverPath || !configFile) return null;
+      const cfgPath = path.isAbsolute(configFile) ? configFile : path.join(serverPath, configFile);
+      if (!await fs.pathExists(cfgPath)) return null;
+      const content = await fs.readFile(cfgPath, 'utf-8');
+      const m = content.match(/^\s*hostname\s*=\s*"([^"]*)"\s*;?/m);
+      return m ? m[1] : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Replace (or insert) the `hostname` line in a DayZ server config (.cfg).
+   * Creates a .bak before writing. Returns { success, path, oldValue, newValue }.
+   */
+  async setHostname(serverPath, configFile, newHostname) {
+    if (!serverPath) throw new Error('Server path not set');
+    if (!configFile) throw new Error('Config file not specified');
+    const cfgPath = path.isAbsolute(configFile) ? configFile : path.join(serverPath, configFile);
+    if (!await fs.pathExists(cfgPath)) {
+      throw new Error(`Config file not found: ${cfgPath}`);
+    }
+
+    const safe = String(newHostname || '').replace(/"/g, '\\"');
+    const content = await fs.readFile(cfgPath, 'utf-8');
+
+    const lineRegex = /^([ \t]*hostname[ \t]*=[ \t]*)"([^"]*)"([ \t]*;?.*)$/m;
+    const match = content.match(lineRegex);
+    let oldValue = null;
+    let updated;
+
+    if (match) {
+      oldValue = match[2];
+      if (oldValue === safe) {
+        return { success: true, path: cfgPath, oldValue, newValue: safe, unchanged: true };
+      }
+      updated = content.replace(lineRegex, `$1"${safe}"$3`);
+    } else {
+      // No hostname line found — prepend one (with trailing newline)
+      const eol = content.includes('\r\n') ? '\r\n' : '\n';
+      updated = `hostname = "${safe}";${eol}` + content;
+    }
+
+    await this.backupConfig(cfgPath);
+    await fs.writeFile(cfgPath, updated, 'utf-8');
+    return { success: true, path: cfgPath, oldValue, newValue: safe };
+  }
+
+  /**
    * Write config file with backup
    */
   async writeConfigFile(configPath, content) {

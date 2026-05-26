@@ -21,6 +21,9 @@ const configEditor = require('./configEditor');
 const logViewer = require('./logViewer');
 const modQueue = require('./modQueue');
 const rconManager = require('./rconManager');
+const modDependencyChecker = require('./modDependencyChecker');
+const notificationService = require('./notificationService');
+const serverUpdateChecker = require('./serverUpdateChecker');
 
 let mainWindow;
 
@@ -29,7 +32,7 @@ let mainWindow;
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1320,
+    width: 1373,
     height: 682,
     minWidth: 1320,
     minHeight: 682,
@@ -60,14 +63,6 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
-
-  // Cleanup on close
-  app.on('before-quit', async () => {
-    logViewer.stopAllTailing();
-    if (serverControl.isRunning) {
-      await serverControl.stopServer();
-    }
-  });
 }
 
 /**
@@ -79,10 +74,36 @@ function sendProgress(channel, data) {
   }
 }
 
+// Cleanup on quit (registered once, outside createWindow to avoid duplicate handlers on macOS)
+app.on('before-quit', async () => {
+  logViewer.stopAllTailing();
+  if (serverControl.isRunning) {
+    await serverControl.stopServer();
+  }
+});
+
 // App event handlers
 app.whenReady().then(async () => {
   await config.load();
   createWindow();
+
+  // Forward SteamCMD console output to renderer
+  steamcmd.on('console', (chunk) => {
+    sendProgress('steamcmd:console', chunk);
+  });
+  steamcmd.on('running', (state) => {
+    sendProgress('steamcmd:running', state);
+  });
+  steamcmd.on('prompt', (info) => {
+    sendProgress('steamcmd:prompt', info);
+  });
+  steamcmd.on('steam-guard-required', () => {
+    sendProgress('steamcmd:steam-guard-required', {});
+  });
+
+  serverControl.on('crashed', (info) => {
+    sendProgress('server:crashed', info);
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -114,8 +135,67 @@ ipcMain.handle('config:set-server-path', async (event, serverPath) => {
   return await config.setServerPath(serverPath);
 });
 
-ipcMain.handle('config:set-steam-credentials', async (event, username, password, useCredentials) => {
-  return await config.setSteamCredentials(username, password, useCredentials);
+ipcMain.handle('config:set-steam-credentials', async (event, username, password) => {
+  return await config.setSteamCredentials(username, password);
+});
+
+ipcMain.handle('config:get-launch-config', async () => {
+  return config.getLaunchConfig();
+});
+
+ipcMain.handle('config:set-launch-config', async (event, partial) => {
+  try {
+    const updated = await config.setLaunchConfig(partial || {});
+
+    // Mirror serverName -> hostname inside the selected .cfg file.
+    // Best-effort: if it fails (no server path set, file missing, etc.) we
+    // still consider the save successful but surface a warning.
+    let hostnameWarning = null;
+    let hostnameApplied = false;
+    if (partial && Object.prototype.hasOwnProperty.call(partial, 'serverName')) {
+      const serverPath = config.getServerPath();
+      if (serverPath && updated.configFile) {
+        try {
+          const res = await configEditor.setHostname(serverPath, updated.configFile, updated.serverName);
+          hostnameApplied = !res.unchanged;
+        } catch (err) {
+          hostnameWarning = err.message;
+        }
+      } else if (!serverPath) {
+        hostnameWarning = 'Server path not set — hostname not written to .cfg';
+      }
+    }
+
+    return { success: true, launchConfig: updated, hostnameApplied, hostnameWarning };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('config:get-server-hostname', async (event, configFile) => {
+  try {
+    const serverPath = config.getServerPath();
+    if (!serverPath) return { success: false, hostname: null };
+    const lc = config.getLaunchConfig();
+    const target = configFile || lc.configFile || 'serverDZ.cfg';
+    const hostname = await configEditor.getHostname(serverPath, target);
+    return { success: true, hostname, configFile: target };
+  } catch (error) {
+    return { success: false, error: error.message, hostname: null };
+  }
+});
+
+ipcMain.handle('config:list-server-configs', async (event, serverPath) => {
+  try {
+    const files = await configEditor.listConfigFiles(serverPath);
+    // Flatten to a list suitable for a dropdown: prefer server-root .cfg files first
+    const flat = [];
+    if (files && Array.isArray(files.server)) flat.push(...files.server);
+    if (files && Array.isArray(files.profile)) flat.push(...files.profile);
+    return { success: true, files: flat };
+  } catch (error) {
+    return { success: false, error: error.message, files: [] };
+  }
 });
 
 ipcMain.handle('config:get-steam-credentials', async () => {
@@ -128,6 +208,33 @@ ipcMain.handle('config:remove-mod', async (event, workshopId) => {
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('config:add-local-mod', async (event, modName, name) => {
+  try {
+    await config.addLocalMod(modName, name);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('config:remove-local-mod', async (event, modName) => {
+  try {
+    await config.removeLocalMod(modName);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('workshop:list-local-mods', async (event, serverPath) => {
+  try {
+    const installed = await workshopManager.listInstalledMods(serverPath);
+    return installed.filter(m => m.isLocal) || [];
+  } catch (error) {
+    return [];
   }
 });
 
@@ -156,6 +263,14 @@ ipcMain.handle('config:get-mods-ordered', async () => {
   } catch (error) {
     return { success: false, error: error.message, mods: [] };
   }
+});
+
+ipcMain.handle('config:get-steam-api', async () => {
+  return config.getSteamApiConfig();
+});
+
+ipcMain.handle('config:set-steam-api', async (event, enabled, apiKey) => {
+  return await config.setSteamApiConfig(enabled, apiKey);
 });
 
 ipcMain.handle('config:select-server-path', async () => {
@@ -199,6 +314,36 @@ ipcMain.handle('steamcmd:download', async (event) => {
   }
 });
 
+ipcMain.handle('steamcmd:input', async (event, text) => {
+  try {
+    steamcmd.writeInput(text);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('steamcmd:kill', async () => {
+  try {
+    steamcmd.killCurrent();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('steamcmd:is-running', async () => {
+  return steamcmd.isRunning();
+});
+
+ipcMain.handle('steamcmd:provide-steam-guard-code', async (event, code) => {
+  return steamcmd.provideSteamGuardCode(code);
+});
+
+ipcMain.handle('steamcmd:cancel-steam-guard', async () => {
+  return steamcmd.cancelSteamGuardPrompt();
+});
+
 // IPC Handlers - Server Management
 ipcMain.handle('server:install', async (event, installPath, branch) => {
   try {
@@ -228,6 +373,14 @@ ipcMain.handle('server:get-version', async (event, installPath) => {
 
 ipcMain.handle('server:validate', async (event, installPath) => {
   return await serverManager.validateInstallation(installPath);
+});
+
+ipcMain.handle('server:check-updates', async (event, serverPath) => {
+  try {
+    return await serverUpdateChecker.checkForUpdates(serverPath);
+  } catch (error) {
+    return { success: false, error: error.message, updateAvailable: false };
+  }
 });
 
 ipcMain.handle('server:list-profiles', async (event, installPath) => {
@@ -290,6 +443,9 @@ ipcMain.handle('workshop:update', async (event, workshopId, installPath) => {
     const result = await workshopManager.updateMod(workshopId, installPath, (progress) => {
       sendProgress('workshop:update-progress', { workshopId, ...progress });
     });
+    if (result?.success && result?.modName) {
+      notificationService.addModUpdate(result.modName);
+    }
     return { success: true, ...result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -402,6 +558,9 @@ ipcMain.handle('workshop:update-all', async (event, modsList, installPath) => {
     const results = await workshopManager.updateAllMods(modsList, installPath, (progress) => {
       sendProgress('workshop:update-all-progress', progress);
     });
+    (results || []).filter(r => r?.success && (r.modName || r.mod?.name)).forEach(r => {
+      notificationService.addModUpdate(r.modName || r.mod?.name);
+    });
     return { success: true, results };
   } catch (error) {
     return { success: false, error: error.message };
@@ -410,6 +569,15 @@ ipcMain.handle('workshop:update-all', async (event, modsList, installPath) => {
 
 ipcMain.handle('workshop:list-installed', async (event, installPath) => {
   return await workshopManager.listInstalledMods(installPath);
+});
+
+ipcMain.handle('workshop:check-updates', async (event, installPath, modsList) => {
+  try {
+    const results = await workshopManager.checkModsForUpdates(installPath, modsList);
+    return { success: true, results };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });
 
 ipcMain.handle('workshop:scan-folder', async (event, workshopFolderPath, serverPath) => {
@@ -423,6 +591,17 @@ ipcMain.handle('workshop:scan-folder', async (event, workshopFolderPath, serverP
 
 ipcMain.handle('workshop:get-info', async (event, workshopId, installPath) => {
   return await workshopManager.getModInfo(workshopId, installPath);
+});
+
+ipcMain.handle('mods:check-dependencies', async (event, serverPath) => {
+  try {
+    const mods = config.getModsOrdered();
+    const installed = await workshopManager.listInstalledMods(serverPath || '');
+    const result = await modDependencyChecker.checkDependencies(serverPath || '', mods, installed);
+    return { success: true, ...result };
+  } catch (error) {
+    return { success: false, error: error.message, violations: [] };
+  }
 });
 
 ipcMain.handle('workshop:remove-mod-folder', async (event, serverPath, modName) => {
@@ -578,6 +757,14 @@ ipcMain.handle('log:read-file', async (event, logPath, lines) => {
 ipcMain.handle('log:start-tail', async (event, logPath) => {
   try {
     logViewer.tailLogFile(logPath, (entry) => {
+      const raw = (entry.raw || entry.message || '').toLowerCase();
+      const joinMatch = raw.match(/player\s+([a-zA-Z0-9_-]+)\s+(?:has\s+)?(?:con|joined|connect)/i);
+      const leaveMatch = raw.match(/player\s+([a-zA-Z0-9_-]+)\s+(?:has\s+)?(?:discon|left|disconnect)/i);
+      if (joinMatch && joinMatch[1].length > 1) {
+        notificationService.addPlayerJoin(joinMatch[1]);
+      } else if (leaveMatch && leaveMatch[1].length > 1) {
+        notificationService.addPlayerLeave(leaveMatch[1]);
+      }
       sendProgress('log:new-line', entry);
     });
     return { success: true };
@@ -657,8 +844,8 @@ ipcMain.handle('server-control:get-player-count', async (event, serverPath, prof
   return await serverControl.getPlayerCount(serverPath, profileName);
 });
 
-ipcMain.handle('server-control:schedule-restart', async (event, time, serverPath, profileName, parameters) => {
-  return serverControl.scheduleRestart(time, serverPath, profileName, parameters);
+ipcMain.handle('server-control:schedule-restart', async (event, time, serverPath, profileName, parameters, repeat) => {
+  return serverControl.scheduleRestart(time, serverPath, profileName, parameters, repeat);
 });
 
 ipcMain.handle('server-control:cancel-scheduled-restart', async (event, id) => {
@@ -825,6 +1012,32 @@ ipcMain.handle('modlist:export', async (event, mods, filePath) => {
   }
 });
 
+// Notification handlers
+ipcMain.handle('notifications:get', () => {
+  return notificationService.getNotifications();
+});
+
+ipcMain.handle('notifications:mark-read', (event, id) => {
+  notificationService.markRead(id);
+  return { success: true };
+});
+
+ipcMain.handle('notifications:mark-all-read', () => {
+  notificationService.markAllRead();
+  return { success: true };
+});
+
+ipcMain.handle('notifications:clear', () => {
+  notificationService.clear();
+  return { success: true };
+});
+
+notificationService.on('notification', (notification) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('notifications:new', notification);
+  }
+});
+
 // Window control handlers
 ipcMain.handle('window:minimize', () => {
   if (mainWindow) {
@@ -857,18 +1070,21 @@ ipcMain.handle('window:is-maximized', () => {
  */
 function generateModlistHTML(mods) {
   const modRows = mods.map(mod => {
-    const displayName = mod.name || `Mod ${mod.workshopId}`;
-    const workshopId = mod.workshopId || mod.workshopId;
-    const workshopUrl = `http://steamcommunity.com/sharedfiles/filedetails/?id=${workshopId}`;
+    const displayName = mod.name || mod.modName || (mod.workshopId ? `Mod ${mod.workshopId}` : 'Unknown');
+    const isLocal = mod.isLocal || !mod.workshopId;
     
+    if (isLocal) {
+      return `        <tr data-type="ModContainer">
+          <td data-type="DisplayName">${escapeHtml(displayName)}</td>
+          <td><span class="from-steam">Local</span></td>
+          <td><em>Local mod - no workshop link</em></td>
+        </tr>`;
+    }
+    const workshopUrl = `http://steamcommunity.com/sharedfiles/filedetails/?id=${mod.workshopId}`;
     return `        <tr data-type="ModContainer">
           <td data-type="DisplayName">${escapeHtml(displayName)}</td>
-          <td>
-            <span class="from-steam">Steam</span>
-          </td>
-          <td>
-            <a href="${workshopUrl}" data-type="Link">${workshopUrl}</a>
-          </td>
+          <td><span class="from-steam">Steam</span></td>
+          <td><a href="${workshopUrl}" data-type="Link">${workshopUrl}</a></td>
         </tr>`;
   }).join('\n');
 
