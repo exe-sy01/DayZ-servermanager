@@ -13,6 +13,8 @@ class ServerControl {
         this.eventListenersAttached = false;
         this.initialized = false;
         this._delegationHandler = null;
+        this.statsHistory = [];
+        this.maxHistoryPoints = 60;
         this.init();
     }
 
@@ -484,18 +486,62 @@ class ServerControl {
 
     updateStats(data) {
         if (data.stats) {
-            document.getElementById('server-cpu').textContent = `${data.stats.cpu.toFixed(1)}%`;
-            document.getElementById('server-ram').textContent = `${data.stats.memoryMB} MB`;
+            const cpuEl = document.getElementById('server-cpu');
+            const ramEl = document.getElementById('server-ram');
+            if (cpuEl) cpuEl.textContent = `${(data.stats.cpu || 0).toFixed(1)}%`;
+            if (ramEl) ramEl.textContent = `${data.stats.memoryMB || 0} MB`;
         }
 
         if (data.playerCount) {
             const max = data.playerCount.max || 0;
-            document.getElementById('player-count').textContent = `${data.playerCount.count}/${max}`;
+            const countEl = document.getElementById('player-count');
+            if (countEl) countEl.textContent = `${data.playerCount.count || 0}/${max}`;
         }
 
         if (data.status) {
             this.updateStatusDisplay(data.status);
         }
+
+        this.statsHistory.push({
+            cpu: data.stats?.cpu || 0,
+            ram: data.stats?.memoryMB || 0,
+            players: data.playerCount?.count || 0,
+            maxPlayers: data.playerCount?.max || 0
+        });
+        if (this.statsHistory.length > this.maxHistoryPoints) {
+            this.statsHistory.shift();
+        }
+        this.drawGraphs();
+    }
+
+    drawGraphs() {
+        const drawLine = (canvasId, values, maxVal, color) => {
+            const canvas = document.getElementById(canvasId);
+            if (!canvas || values.length < 2) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            const max = Math.max(maxVal, Math.max(...values), 1);
+            const pad = 4;
+            ctx.strokeStyle = color || 'var(--accent)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            values.forEach((v, i) => {
+                const x = pad + (i / (values.length - 1)) * (w - pad * 2);
+                const y = h - pad - (v / max) * (h - pad * 2);
+                ctx[i === 0 ? 'moveTo' : 'lineTo'](x, y);
+            });
+            ctx.stroke();
+        };
+
+        const cpu = this.statsHistory.map(s => s.cpu);
+        const ram = this.statsHistory.map(s => s.ram);
+        const players = this.statsHistory.map(s => s.players);
+        const maxPlayers = Math.max(1, ...this.statsHistory.map(s => s.maxPlayers));
+        drawLine('graph-cpu', cpu, 100, 'var(--accent)');
+        drawLine('graph-ram', ram, Math.max(...ram, 100), 'var(--survival-green)');
+        drawLine('graph-players', players, maxPlayers, 'var(--success)');
     }
 
     updateStatusDisplay(status) {
@@ -564,8 +610,8 @@ class ServerControl {
             const paramsInput = document.getElementById('server-parameters');
             
             this.profileName = profileSelect ? profileSelect.value : 'default';
-            const paramsText = paramsInput ? paramsInput.value : '';
-            this.parameters = paramsText ? paramsText.split(' ').filter(p => p.trim()) : [];
+            // Extras are persisted in launchConfig.extraParams and applied by the main process.
+            this.parameters = [];
 
             // Get ordered mods and use their actual folder names
             let modParameter = '';
@@ -581,18 +627,18 @@ class ServerControl {
                     // Build mod parameter in load order
                     const modNames = [];
                     for (const orderedMod of orderedMods) {
-                        // Find matching installed mod by workshop ID
-                        const installedMod = installedMods.find(im => 
-                            String(im.workshopId) === String(orderedMod.workshopId)
-                        );
-                        
-                        if (installedMod && installedMod.modName) {
-                            // Use modName from mod.info (actual folder name)
-                            let modName = installedMod.modName;
-                            // Remove ALL @ symbols from anywhere in the name
-                            modName = modName.replace(/@/g, '');
-                            modName = modName.trim();
-                            modName = modName.replace(/[^a-zA-Z0-9_-]/g, '');
+                        let modName = null;
+                        if (orderedMod.isLocal && orderedMod.modName) {
+                            modName = String(orderedMod.modName).replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                        } else {
+                            const installedMod = installedMods.find(im => 
+                                !im.isLocal && String(im.workshopId) === String(orderedMod.workshopId)
+                            );
+                            if (installedMod && installedMod.modName) {
+                                modName = installedMod.modName.replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                            }
+                        }
+                        if (modName) {
                             modNames.push(`@${modName}`);
                         }
                     }
@@ -707,8 +753,8 @@ class ServerControl {
         }
 
         this.profileName = document.getElementById('server-profile-select').value;
-        const paramsText = document.getElementById('server-parameters').value;
-        this.parameters = paramsText ? paramsText.split(' ').filter(p => p.trim()) : [];
+        // Extras are persisted in launchConfig.extraParams and applied by the main process.
+        this.parameters = [];
 
         // Get ordered mods and use their actual folder names
         try {
@@ -718,24 +764,22 @@ class ServerControl {
             if (orderedMods.length > 0) {
                 const installedMods = await window.electronAPI.workshopListInstalled(this.serverPath);
                 const modNames = [];
-                
                 for (const orderedMod of orderedMods) {
-                    const installedMod = installedMods.find(im => 
-                        String(im.workshopId) === String(orderedMod.workshopId)
-                    );
-                    
-                    if (installedMod && installedMod.modName) {
-                        let modName = installedMod.modName;
-                        modName = modName.replace(/@/g, '');
-                        modName = modName.trim();
-                        modName = modName.replace(/[^a-zA-Z0-9_-]/g, '');
-                        modNames.push(`@${modName}`);
+                    let modName = null;
+                    if (orderedMod.isLocal && orderedMod.modName) {
+                        modName = String(orderedMod.modName).replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                    } else {
+                        const installedMod = installedMods.find(im =>
+                            !im.isLocal && String(im.workshopId) === String(orderedMod.workshopId)
+                        );
+                        if (installedMod && installedMod.modName) {
+                            modName = installedMod.modName.replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                        }
                     }
+                    if (modName) modNames.push(`@${modName}`);
                 }
-                
                 if (modNames.length > 0) {
-                    const modParameter = `-mod=${modNames.join(';')}`;
-                    this.parameters.push(modParameter);
+                    this.parameters.push(`-mod=${modNames.join(';')}`);
                 }
             }
         } catch (error) {
@@ -778,8 +822,8 @@ class ServerControl {
         }
 
         this.profileName = document.getElementById('server-profile-select').value;
-        const paramsText = document.getElementById('server-parameters').value;
-        this.parameters = paramsText ? paramsText.split(' ').filter(p => p.trim()) : [];
+        // Extras are persisted in launchConfig.extraParams and applied by the main process.
+        this.parameters = [];
 
         // Get ordered mods and use their actual folder names
         try {
@@ -789,24 +833,22 @@ class ServerControl {
             if (orderedMods.length > 0) {
                 const installedMods = await window.electronAPI.workshopListInstalled(this.serverPath);
                 const modNames = [];
-                
                 for (const orderedMod of orderedMods) {
-                    const installedMod = installedMods.find(im => 
-                        String(im.workshopId) === String(orderedMod.workshopId)
-                    );
-                    
-                    if (installedMod && installedMod.modName) {
-                        let modName = installedMod.modName;
-                        modName = modName.replace(/@/g, '');
-                        modName = modName.trim();
-                        modName = modName.replace(/[^a-zA-Z0-9_-]/g, '');
-                        modNames.push(`@${modName}`);
+                    let modName = null;
+                    if (orderedMod.isLocal && orderedMod.modName) {
+                        modName = String(orderedMod.modName).replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                    } else {
+                        const installedMod = installedMods.find(im =>
+                            !im.isLocal && String(im.workshopId) === String(orderedMod.workshopId)
+                        );
+                        if (installedMod && installedMod.modName) {
+                            modName = installedMod.modName.replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                        }
                     }
+                    if (modName) modNames.push(`@${modName}`);
                 }
-                
                 if (modNames.length > 0) {
-                    const modParameter = `-mod=${modNames.join(';')}`;
-                    this.parameters.push(modParameter);
+                    this.parameters.push(`-mod=${modNames.join(';')}`);
                 }
             }
         } catch (error) {
@@ -889,8 +931,8 @@ class ServerControl {
         }
 
         this.profileName = document.getElementById('server-profile-select').value;
-        const paramsText = document.getElementById('server-parameters').value;
-        this.parameters = paramsText ? paramsText.split(' ').filter(p => p.trim()) : [];
+        // Extras are persisted in launchConfig.extraParams and applied by the main process.
+        this.parameters = [];
 
         // Get ordered mods and use their actual folder names
         try {
@@ -900,24 +942,22 @@ class ServerControl {
             if (orderedMods.length > 0) {
                 const installedMods = await window.electronAPI.workshopListInstalled(this.serverPath);
                 const modNames = [];
-                
                 for (const orderedMod of orderedMods) {
-                    const installedMod = installedMods.find(im => 
-                        String(im.workshopId) === String(orderedMod.workshopId)
-                    );
-                    
-                    if (installedMod && installedMod.modName) {
-                        let modName = installedMod.modName;
-                        modName = modName.replace(/@/g, '');
-                        modName = modName.trim();
-                        modName = modName.replace(/[^a-zA-Z0-9_-]/g, '');
-                        modNames.push(`@${modName}`);
+                    let modName = null;
+                    if (orderedMod.isLocal && orderedMod.modName) {
+                        modName = String(orderedMod.modName).replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                    } else {
+                        const installedMod = installedMods.find(im =>
+                            !im.isLocal && String(im.workshopId) === String(orderedMod.workshopId)
+                        );
+                        if (installedMod && installedMod.modName) {
+                            modName = installedMod.modName.replace(/@/g, '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+                        }
                     }
+                    if (modName) modNames.push(`@${modName}`);
                 }
-                
                 if (modNames.length > 0) {
-                    const modParameter = `-mod=${modNames.join(';')}`;
-                    this.parameters.push(modParameter);
+                    this.parameters.push(`-mod=${modNames.join(';')}`);
                 }
             }
         } catch (error) {
@@ -930,7 +970,8 @@ class ServerControl {
                 time.toISOString(),
                 this.serverPath,
                 this.profileName,
-                this.parameters
+                this.parameters,
+                repeat
             );
 
             if (result) {
@@ -955,10 +996,11 @@ class ServerControl {
 
             container.innerHTML = restarts.map(restart => {
                 const time = new Date(restart.time);
+                const repeatLabel = restart.repeat === 'daily' ? ' (daily)' : restart.repeat === 'weekly' ? ' (weekly)' : '';
                 return `
                     <div class="scheduled-restart-item">
                         <div class="restart-info">
-                            <div class="restart-time">${time.toLocaleString()}</div>
+                            <div class="restart-time">${time.toLocaleString()}${repeatLabel}</div>
                             <div class="restart-profile">Profile: ${restart.profileName}</div>
                         </div>
                         <button class="btn btn-secondary btn-sm" onclick="window.serverControl.cancelScheduledRestart('${restart.id}')">Cancel</button>

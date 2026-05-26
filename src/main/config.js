@@ -20,14 +20,34 @@ class Config {
       },
       steamCredentials: {
         username: '',
-        password: '',
-        useCredentials: false
+        password: ''
       },
       rcon: {
         enabled: false,
         host: '127.0.0.1',
         port: 2302,
         password: ''
+      },
+      steamApi: {
+        enabled: false,
+        apiKey: ''
+      },
+      launchConfig: {
+        serverName: 'DayZ Server',
+        port: 2302,
+        cpuCount: 0,                // 0 = let DayZ decide
+        configFile: 'serverDZ.cfg', // relative to server path
+        profileName: 'default',
+        bePath: '',                 // optional -BEpath= override
+        flags: {
+          doLogs: true,
+          adminLog: true,
+          netLog: true,
+          freezeCheck: true,
+          filePatching: false
+        },
+        extraParams: '',
+        autoRestartIntervalSec: 0   // 0 = disabled
       }
     };
     this.config = null;
@@ -41,6 +61,10 @@ class Config {
       if (await fs.pathExists(this.configPath)) {
         const data = await fs.readJson(this.configPath);
         this.config = { ...this.defaultConfig, ...data };
+        if (this.config.steamCredentials && 'useCredentials' in this.config.steamCredentials) {
+          delete this.config.steamCredentials.useCredentials;
+          await this.save();
+        }
         
         // Migration: Assign loadOrder to mods that don't have it
         if (this.config.mods && this.config.mods.length > 0) {
@@ -124,11 +148,12 @@ class Config {
   }
 
   /**
-   * Get configuration value
+   * Get configuration value (synchronous).
+   * Config must be loaded first via load(). Throws if not loaded.
    */
   get(key) {
     if (!this.config) {
-      this.load();
+      throw new Error('Config not loaded. Ensure load() has been awaited.');
     }
     return key ? this.config[key] : this.config;
   }
@@ -159,7 +184,7 @@ class Config {
   }
 
   /**
-   * Add mod to list
+   * Add mod to list (workshop mod)
    */
   async addMod(workshopId, name) {
     if (!this.config) {
@@ -167,13 +192,30 @@ class Config {
     }
     const mods = this.config.mods || [];
     if (!mods.find(m => m.workshopId === workshopId)) {
-      // Assign loadOrder based on current mod count + 1
-      const maxLoadOrder = mods.length > 0 
-        ? Math.max(...mods.map(m => m.loadOrder || 0), 0)
-        : 0;
-      mods.push({ 
-        workshopId, 
-        name, 
+      const maxLoadOrder = mods.length > 0 ? Math.max(...mods.map(m => m.loadOrder || 0), 0) : 0;
+      mods.push({ workshopId, name, added: new Date().toISOString(), loadOrder: maxLoadOrder + 1 });
+      this.config.mods = mods;
+      return await this.save();
+    }
+    return false;
+  }
+
+  /**
+   * Add local mod (not from Workshop)
+   */
+  async addLocalMod(modName, name) {
+    if (!this.config) {
+      await this.load();
+    }
+    const mods = this.config.mods || [];
+    const cleanModName = (modName || '').replace(/^@/, '').trim();
+    if (!cleanModName) return false;
+    if (!mods.find(m => m.isLocal && m.modName === cleanModName)) {
+      const maxLoadOrder = mods.length > 0 ? Math.max(...mods.map(m => m.loadOrder || 0), 0) : 0;
+      mods.push({
+        isLocal: true,
+        modName: cleanModName,
+        name: name || cleanModName,
         added: new Date().toISOString(),
         loadOrder: maxLoadOrder + 1
       });
@@ -184,13 +226,13 @@ class Config {
   }
 
   /**
-   * Remove mod from list
+   * Remove mod from list (workshop or local)
    */
   async removeMod(workshopId) {
     if (!this.config) {
       await this.load();
     }
-    const mods = (this.config.mods || []).filter(m => m.workshopId !== workshopId);
+    const mods = (this.config.mods || []).filter(m => String(m.workshopId) !== String(workshopId));
     
     // Renumber remaining mods to fill gaps (1-indexed sequential)
     mods.sort((a, b) => {
@@ -211,6 +253,29 @@ class Config {
   }
 
   /**
+   * Remove local mod by modName
+   */
+  async removeLocalMod(modName) {
+    if (!this.config) {
+      await this.load();
+    }
+    const cleanModName = (modName || '').replace(/^@/, '').trim();
+    const mods = (this.config.mods || []).filter(m => !(m.isLocal && m.modName === cleanModName));
+    if (mods.length === this.config.mods.length) return false;
+    mods.sort((a, b) => {
+      const orderA = a.loadOrder || 999999;
+      const orderB = b.loadOrder || 999999;
+      if (orderA !== orderB) return orderA - orderB;
+      const dateA = a.added ? new Date(a.added).getTime() : 0;
+      const dateB = b.added ? new Date(b.added).getTime() : 0;
+      return dateA - dateB;
+    });
+    mods.forEach((m, i) => { m.loadOrder = i + 1; });
+    this.config.mods = mods;
+    return await this.save();
+  }
+
+  /**
    * Get mods list
    */
   getMods() {
@@ -220,14 +285,13 @@ class Config {
   /**
    * Set Steam credentials
    */
-  async setSteamCredentials(username, password, useCredentials = true) {
+  async setSteamCredentials(username, password) {
     if (!this.config) {
       await this.load();
     }
     this.config.steamCredentials = {
-      username: username || '',
-      password: password || '',
-      useCredentials: useCredentials
+      username: (username || '').trim(),
+      password: password || ''
     };
     return await this.save();
   }
@@ -236,7 +300,8 @@ class Config {
    * Get Steam credentials
    */
   getSteamCredentials() {
-    return this.get('steamCredentials') || { username: '', password: '', useCredentials: false };
+    const creds = this.get('steamCredentials') || { username: '', password: '' };
+    return { username: creds.username || '', password: creds.password || '' };
   }
 
   /**
@@ -263,38 +328,90 @@ class Config {
   }
 
   /**
-   * Set mod load order
+   * Get Steam Web API configuration
    */
-  async setModLoadOrder(workshopId, loadOrder) {
+  getSteamApiConfig() {
+    return this.get('steamApi') || { enabled: false, apiKey: '' };
+  }
+
+  /**
+   * Get launch configuration (server command-line settings)
+   */
+  getLaunchConfig() {
+    const def = this.defaultConfig.launchConfig;
+    const current = this.get('launchConfig') || {};
+    return {
+      ...def,
+      ...current,
+      flags: { ...def.flags, ...(current.flags || {}) }
+    };
+  }
+
+  /**
+   * Persist launch configuration (partial update, deep-merged with current)
+   */
+  async setLaunchConfig(partial) {
+    if (!this.config) await this.load();
+    const current = this.getLaunchConfig();
+    const merged = {
+      ...current,
+      ...partial,
+      flags: { ...current.flags, ...(partial?.flags || {}) }
+    };
+    // Coerce numeric fields
+    merged.port = parseInt(merged.port, 10) || 2302;
+    merged.cpuCount = parseInt(merged.cpuCount, 10) || 0;
+    merged.autoRestartIntervalSec = parseInt(merged.autoRestartIntervalSec, 10) || 0;
+    this.config.launchConfig = merged;
+    await this.save();
+    return merged;
+  }
+
+  /**
+   * Set Steam Web API configuration
+   */
+  async setSteamApiConfig(enabled, apiKey) {
+    if (!this.config) {
+      await this.load();
+    }
+    this.config.steamApi = {
+      enabled: !!enabled,
+      apiKey: (apiKey || '').trim()
+    };
+    return await this.save();
+  }
+
+  /**
+   * Set mod load order (workshopId or "local:ModName")
+   */
+  async setModLoadOrder(modId, loadOrder) {
     if (!this.config) {
       await this.load();
     }
     
     const mods = this.config.mods || [];
-    const mod = mods.find(m => String(m.workshopId) === String(workshopId));
-    if (!mod) {
-      return false;
-    }
+    const mod = String(modId).startsWith('local:')
+      ? mods.find(m => m.isLocal && m.modName === String(modId).replace(/^local:/, ''))
+      : mods.find(m => !m.isLocal && String(m.workshopId) === String(modId));
+    if (!mod) return false;
+    
+    const isSameMod = (m) =>
+      m.isLocal ? (mod.isLocal && m.modName === mod.modName) : (m.workshopId === mod.workshopId);
     
     const oldOrder = mod.loadOrder || mods.length;
     const newOrder = Math.max(1, Math.min(loadOrder, mods.length));
     
-    if (oldOrder === newOrder) {
-      return true; // No change needed
-    }
+    if (oldOrder === newOrder) return true;
     
-    // Shift other mods
     if (newOrder < oldOrder) {
-      // Moving up: shift mods between newOrder and oldOrder down by 1
       mods.forEach(m => {
-        if (String(m.workshopId) !== String(workshopId) && m.loadOrder >= newOrder && m.loadOrder < oldOrder) {
+        if (!isSameMod(m) && m.loadOrder >= newOrder && m.loadOrder < oldOrder) {
           m.loadOrder = (m.loadOrder || 0) + 1;
         }
       });
     } else {
-      // Moving down: shift mods between oldOrder and newOrder up by 1
       mods.forEach(m => {
-        if (String(m.workshopId) !== String(workshopId) && m.loadOrder > oldOrder && m.loadOrder <= newOrder) {
+        if (!isSameMod(m) && m.loadOrder > oldOrder && m.loadOrder <= newOrder) {
           m.loadOrder = (m.loadOrder || 0) - 1;
         }
       });
@@ -321,7 +438,7 @@ class Config {
   }
 
   /**
-   * Reorder mods based on array of workshop IDs
+   * Reorder mods based on array of identifiers (workshopId or "local:ModName")
    */
   async reorderMods(modOrderArray) {
     if (!this.config) {
@@ -330,24 +447,24 @@ class Config {
     
     const mods = this.config.mods || [];
     
-    // Validate that all mods in order array exist
-    const validMods = modOrderArray.filter(id => mods.find(m => String(m.workshopId) === String(id)));
-    
-    if (validMods.length !== mods.length) {
-      // Some mods are missing, add them at the end
-      mods.forEach(mod => {
-        if (!validMods.some(id => String(id) === String(mod.workshopId))) {
-          validMods.push(mod.workshopId);
-        }
-      });
-    }
-    
-    // Assign new load orders
-    validMods.forEach((workshopId, index) => {
-      const mod = mods.find(m => String(m.workshopId) === String(workshopId));
-      if (mod) {
-        mod.loadOrder = index + 1;
+    const getModId = (mod) => mod.isLocal ? `local:${mod.modName}` : String(mod.workshopId);
+    const findMod = (id) => {
+      if (String(id).startsWith('local:')) {
+        const modName = String(id).replace(/^local:/, '');
+        return mods.find(m => m.isLocal && m.modName === modName);
       }
+      return mods.find(m => !m.isLocal && String(m.workshopId) === String(id));
+    };
+
+    let validMods = modOrderArray.filter(id => findMod(id));
+    mods.forEach(mod => {
+      const id = getModId(mod);
+      if (!validMods.includes(id)) validMods.push(id);
+    });
+    
+    validMods.forEach((id, index) => {
+      const mod = findMod(id);
+      if (mod) mod.loadOrder = index + 1;
     });
     
     this.config.mods = mods;
@@ -355,11 +472,12 @@ class Config {
   }
 
   /**
-   * Get mods sorted by load order
+   * Get mods sorted by load order.
+   * Config must be loaded first via load().
    */
   getModsOrdered() {
     if (!this.config) {
-      this.load();
+      throw new Error('Config not loaded. Ensure load() has been awaited.');
     }
     const mods = this.get('mods') || [];
     

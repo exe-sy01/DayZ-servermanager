@@ -13,16 +13,55 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configGetServerPath: () => ipcRenderer.invoke('config:get-server-path'),
   configSetServerPath: (path) => ipcRenderer.invoke('config:set-server-path', path),
   configSelectServerPath: () => ipcRenderer.invoke('config:select-server-path'),
-  configSetSteamCredentials: (username, password, useCredentials) => ipcRenderer.invoke('config:set-steam-credentials', username, password, useCredentials),
+  configSetSteamCredentials: (username, password) => ipcRenderer.invoke('config:set-steam-credentials', username, password),
   configGetSteamCredentials: () => ipcRenderer.invoke('config:get-steam-credentials'),
   configRemoveMod: (workshopId) => ipcRenderer.invoke('config:remove-mod', workshopId),
+  configAddLocalMod: (modName, name) => ipcRenderer.invoke('config:add-local-mod', modName, name),
+  configRemoveLocalMod: (modName) => ipcRenderer.invoke('config:remove-local-mod', modName),
+  workshopListLocalMods: (serverPath) => ipcRenderer.invoke('workshop:list-local-mods', serverPath),
   configSetModLoadOrder: (workshopId, loadOrder) => ipcRenderer.invoke('config:set-mod-load-order', workshopId, loadOrder),
   configReorderMods: (modOrderArray) => ipcRenderer.invoke('config:reorder-mods', modOrderArray),
   configGetModsOrdered: () => ipcRenderer.invoke('config:get-mods-ordered'),
+  configGetSteamApi: () => ipcRenderer.invoke('config:get-steam-api'),
+  configSetSteamApi: (enabled, apiKey) => ipcRenderer.invoke('config:set-steam-api', enabled, apiKey),
+  configGetLaunchConfig: () => ipcRenderer.invoke('config:get-launch-config'),
+  configSetLaunchConfig: (partial) => ipcRenderer.invoke('config:set-launch-config', partial),
+  configListServerConfigs: (serverPath) => ipcRenderer.invoke('config:list-server-configs', serverPath),
+  configGetServerHostname: (configFile) => ipcRenderer.invoke('config:get-server-hostname', configFile),
+  onServerCrashed: (callback) => {
+    const handler = (event, info) => callback(info);
+    ipcRenderer.on('server:crashed', handler);
+    return () => ipcRenderer.removeListener('server:crashed', handler);
+  },
 
   // SteamCMD
   steamcmdIsInstalled: () => ipcRenderer.invoke('steamcmd:is-installed'),
   steamcmdDownload: () => ipcRenderer.invoke('steamcmd:download'),
+  onSteamcmdConsole: (callback) => {
+    const handler = (event, chunk) => callback(chunk);
+    ipcRenderer.on('steamcmd:console', handler);
+    return () => ipcRenderer.removeListener('steamcmd:console', handler);
+  },
+  onSteamcmdRunning: (callback) => {
+    const handler = (event, state) => callback(state);
+    ipcRenderer.on('steamcmd:running', handler);
+    return () => ipcRenderer.removeListener('steamcmd:running', handler);
+  },
+  onSteamcmdPrompt: (callback) => {
+    const handler = (event, info) => callback(info);
+    ipcRenderer.on('steamcmd:prompt', handler);
+    return () => ipcRenderer.removeListener('steamcmd:prompt', handler);
+  },
+  steamcmdSendInput: (text) => ipcRenderer.invoke('steamcmd:input', text),
+  steamcmdKill: () => ipcRenderer.invoke('steamcmd:kill'),
+  steamcmdIsRunning: () => ipcRenderer.invoke('steamcmd:is-running'),
+  steamcmdProvideSteamGuardCode: (code) => ipcRenderer.invoke('steamcmd:provide-steam-guard-code', code),
+  steamcmdCancelSteamGuard: () => ipcRenderer.invoke('steamcmd:cancel-steam-guard'),
+  onSteamcmdSteamGuardRequired: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('steamcmd:steam-guard-required', handler);
+    return () => ipcRenderer.removeListener('steamcmd:steam-guard-required', handler);
+  },
 
   // Server
   serverInstall: (installPath, branch) => ipcRenderer.invoke('server:install', installPath, branch),
@@ -30,6 +69,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serverGetVersion: (installPath) => ipcRenderer.invoke('server:get-version', installPath),
   serverValidate: (installPath) => ipcRenderer.invoke('server:validate', installPath),
   serverListProfiles: (installPath) => ipcRenderer.invoke('server:list-profiles', installPath),
+  serverCheckUpdates: (serverPath) => ipcRenderer.invoke('server:check-updates', serverPath),
 
   // Workshop
   workshopSearch: (query, page, sortBy) => ipcRenderer.invoke('workshop:search', query, page, sortBy),
@@ -38,6 +78,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   workshopDownload: (workshopId, installPath) => ipcRenderer.invoke('workshop:download', workshopId, installPath),
   workshopUpdate: (workshopId, installPath) => ipcRenderer.invoke('workshop:update', workshopId, installPath),
   workshopUpdateAll: (modsList, installPath) => ipcRenderer.invoke('workshop:update-all', modsList, installPath),
+  workshopCheckUpdates: (installPath, modsList) => ipcRenderer.invoke('workshop:check-updates', installPath, modsList),
   workshopListInstalled: (installPath) => ipcRenderer.invoke('workshop:list-installed', installPath),
   workshopGetInfo: (workshopId, installPath) => ipcRenderer.invoke('workshop:get-info', workshopId, installPath),
   workshopScanFolder: (workshopFolderPath, serverPath) => ipcRenderer.invoke('workshop:scan-folder', workshopFolderPath, serverPath),
@@ -45,6 +86,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeModFolder: (serverPath, modName) => ipcRenderer.invoke('workshop:remove-mod-folder', serverPath, modName),
   workshopGetCollection: (collectionId) => ipcRenderer.invoke('workshop:get-collection', collectionId),
   workshopDownloadCollection: (collectionId, installPath) => ipcRenderer.invoke('workshop:download-collection', collectionId, installPath),
+  modsCheckDependencies: (serverPath) => ipcRenderer.invoke('mods:check-dependencies', serverPath),
 
   // Mod Queue
   modQueueAdd: (workshopId, isCollection, name) => ipcRenderer.invoke('mod-queue:add', workshopId, isCollection, name),
@@ -80,7 +122,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   serverControlGetStatus: () => ipcRenderer.invoke('server-control:get-status'),
   serverControlGetStats: () => ipcRenderer.invoke('server-control:get-stats'),
   serverControlGetPlayerCount: (serverPath, profileName) => ipcRenderer.invoke('server-control:get-player-count', serverPath, profileName),
-  serverControlScheduleRestart: (time, serverPath, profileName, parameters) => ipcRenderer.invoke('server-control:schedule-restart', time, serverPath, profileName, parameters),
+  serverControlScheduleRestart: (time, serverPath, profileName, parameters, repeat) => ipcRenderer.invoke('server-control:schedule-restart', time, serverPath, profileName, parameters, repeat),
   serverControlCancelScheduledRestart: (id) => ipcRenderer.invoke('server-control:cancel-scheduled-restart', id),
   serverControlGetScheduledRestarts: () => ipcRenderer.invoke('server-control:get-scheduled-restarts'),
 
@@ -91,12 +133,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener(channel, subscription);
   },
   onModQueueUpdate: (callback) => {
-    ipcRenderer.on('mod-queue:updated', (event, status) => callback(status));
-    return () => ipcRenderer.removeListener('mod-queue:updated', callback);
+    const handler = (event, status) => callback(status);
+    ipcRenderer.on('mod-queue:updated', handler);
+    return () => ipcRenderer.removeListener('mod-queue:updated', handler);
   },
   onModQueueItemProgress: (callback) => {
-    ipcRenderer.on('mod-queue:item-progress', (event, data) => callback(data));
-    return () => ipcRenderer.removeListener('mod-queue:item-progress', callback);
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('mod-queue:item-progress', handler);
+    return () => ipcRenderer.removeListener('mod-queue:item-progress', handler);
   },
 
   // RCON
@@ -116,6 +160,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Modlist Export
   modlistSelectExportPath: () => ipcRenderer.invoke('modlist:select-export-path'),
   modlistExport: (mods, filePath) => ipcRenderer.invoke('modlist:export', mods, filePath),
+
+  // Notifications
+  notificationsGet: () => ipcRenderer.invoke('notifications:get'),
+  notificationsMarkRead: (id) => ipcRenderer.invoke('notifications:mark-read', id),
+  notificationsMarkAllRead: () => ipcRenderer.invoke('notifications:mark-all-read'),
+  notificationsClear: () => ipcRenderer.invoke('notifications:clear'),
+  onNotification: (callback) => {
+    const handler = (event, notification) => callback(notification);
+    ipcRenderer.on('notifications:new', handler);
+    return () => ipcRenderer.removeListener('notifications:new', handler);
+  },
 
   // Window controls
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
