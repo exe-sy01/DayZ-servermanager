@@ -30,12 +30,24 @@
   }
 
   function setRunning(isRunning) {
+    const wasRunning = running;
     running = isRunning;
     if (inputRow) inputRow.style.display = isRunning ? 'flex' : 'none';
     if (killBtn) killBtn.style.display = isRunning ? '' : 'none';
     if (!isRunning && promptEl) {
       promptEl.style.display = 'none';
       promptEl.innerHTML = '';
+    }
+    // Auto-collapse the drawer a few seconds after SteamCMD finishes, so it
+    // stops covering controls below it. Skip if the user is mid-input.
+    if (wasRunning && !isRunning) {
+      setTimeout(() => {
+        if (running) return; // a new run started
+        const focused = document.activeElement;
+        if (focused && (focused === inputEl || focused.closest('.steamcmd-drawer'))) return;
+        setExpanded(false);
+        userCollapsed = false; // reset so next run can auto-expand again
+      }, 2500);
     }
   }
 

@@ -27,14 +27,28 @@ class WorkshopManager {
   }
 
   /**
-   * Search DayZ workshop mods by name
+   * Search DayZ workshop mods by name.
+   * Uses the official Steam Web API when an API key is configured (reliable),
+   * otherwise falls back to scraping the workshop website (fragile).
    */
   async searchMods(query, page = 1, sortBy = 'relevance') {
     const cacheKey = `${query}_${page}_${sortBy}`;
     const cached = this.searchCache.get(cacheKey);
-    
+
     if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
       return cached.data;
+    }
+
+    // Prefer the official API when a key is available
+    const steamApi = require('./config').getSteamApiConfig();
+    if (steamApi.enabled && steamApi.apiKey) {
+      try {
+        const result = await this.searchModsViaApi(query, page, sortBy, steamApi.apiKey);
+        this.searchCache.set(cacheKey, { data: result, timestamp: Date.now() });
+        return result;
+      } catch (error) {
+        console.warn('Steam API search failed, falling back to web scraping:', error.message);
+      }
     }
 
     try {
@@ -90,6 +104,10 @@ class WorkshopManager {
         hasMore: mods.length === 30
       };
 
+      if (mods.length === 0 && !(steamApi.enabled && steamApi.apiKey)) {
+        throw new Error('Steam returned no results — the workshop website may be blocking scraping. Set a Steam Web API key in Settings for reliable search.');
+      }
+
       this.searchCache.set(cacheKey, {
         data: result,
         timestamp: Date.now()
@@ -100,6 +118,58 @@ class WorkshopManager {
       console.error('Error searching mods:', error);
       throw new Error(`Failed to search mods: ${error.message}`);
     }
+  }
+
+  /**
+   * Search via official Steam Web API (IPublishedFileService/QueryFiles).
+   * Requires a Steam Web API key.
+   */
+  async searchModsViaApi(query, page = 1, sortBy = 'relevance', apiKey) {
+    // Steam query_type: 12 = text search relevance, 9 = total subscriptions, 3 = trend
+    const queryTypeMap = { relevance: 12, mostsubscribed: 9, trend: 3 };
+    let queryType = queryTypeMap[sortBy] ?? 12;
+    // Empty search sorted by "relevance" makes no sense — show most subscribed
+    if (!query && queryType === 12) queryType = 9;
+
+    const response = await axios.get('https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/', {
+      params: {
+        key: apiKey,
+        appid: this.workshopAppId,
+        search_text: query || '',
+        query_type: queryType,
+        page: page,
+        numperpage: 30,
+        return_metadata: true,
+        return_tags: true,
+        return_vote_data: false
+      },
+      timeout: 15000
+    });
+
+    const data = response.data?.response || {};
+    const files = data.publishedfiledetails || [];
+    const total = data.total || 0;
+
+    const mods = files
+      .filter(f => f && f.publishedfileid && f.result === 1)
+      .map(f => ({
+        workshopId: String(f.publishedfileid),
+        name: f.title || `Mod ${f.publishedfileid}`,
+        description: (f.file_description || '').substring(0, 200),
+        thumbnail: f.preview_url || '',
+        subscriberCount: f.subscriptions || f.lifetime_subscriptions || 0,
+        lastUpdated: f.time_updated ? f.time_updated * 1000 : null,
+        fileSize: f.file_size ? parseInt(f.file_size, 10) : null,
+        tags: (f.tags || []).map(t => t.tag || t.display_name).filter(Boolean),
+        author: null
+      }));
+
+    return {
+      mods,
+      page,
+      totalPages: Math.max(1, Math.ceil(total / 30)),
+      hasMore: page * 30 < total
+    };
   }
 
   /**
@@ -962,6 +1032,84 @@ class WorkshopManager {
       console.error('Error listing installed mods:', error);
       return [];
     }
+  }
+
+  /**
+   * Scan the server directory itself for already-installed mods and register
+   * them in the app config so they show up on the Mods page.
+   * Covers steamapps/workshop/content/221100/<id> folders and @ModName
+   * folders (symlinks or copies, workshop or local), and copies .bikey keys.
+   */
+  async scanServerDirectory(serverPath) {
+    if (!serverPath || !await fs.pathExists(serverPath)) {
+      throw new Error('Server path is not set or does not exist');
+    }
+
+    const config = require('./config');
+    const installed = await this.listInstalledMods(serverPath);
+
+    if (installed.length === 0) {
+      return { success: true, found: 0, added: 0, alreadyKnown: 0, mods: [] };
+    }
+
+    // Try to fetch proper display names for workshop mods in one batched call
+    // (public endpoint, no API key). Tolerate failure — offline is fine.
+    let remoteMap = new Map();
+    const workshopIds = installed.filter(m => m.workshopId && !m.isLocal).map(m => String(m.workshopId));
+    if (workshopIds.length > 0) {
+      try {
+        remoteMap = await this.getPublishedFileDetails(workshopIds);
+      } catch (error) {
+        console.warn('Could not fetch mod titles from Steam (offline?):', error.message);
+      }
+    }
+
+    const configMods = config.getMods() || [];
+    const knownWorkshop = new Set(configMods.filter(m => !m.isLocal).map(m => String(m.workshopId)));
+    const knownLocal = new Set(configMods.filter(m => m.isLocal).map(m => m.modName));
+
+    let added = 0;
+    let alreadyKnown = 0;
+    const results = [];
+    const keysPath = path.join(serverPath, 'keys');
+
+    for (const mod of installed) {
+      try {
+        if (mod.isLocal || !mod.workshopId) {
+          const modName = mod.modName;
+          if (!modName) continue;
+          if (knownLocal.has(modName)) {
+            alreadyKnown++;
+          } else {
+            await config.addLocalMod(modName, mod.name || modName);
+            knownLocal.add(modName);
+            added++;
+            results.push({ type: 'local', modName, name: mod.name || modName });
+          }
+        } else {
+          const id = String(mod.workshopId);
+          if (knownWorkshop.has(id)) {
+            alreadyKnown++;
+          } else {
+            const displayName = remoteMap.get(id)?.title || mod.name || mod.modName || `Mod ${id}`;
+            await config.addMod(id, displayName);
+            knownWorkshop.add(id);
+            added++;
+            results.push({ type: 'workshop', workshopId: id, name: displayName });
+          }
+        }
+
+        // Make sure the mod's signing keys are in the server keys/ folder
+        const modDir = mod.serverModPath || mod.path;
+        if (modDir && await fs.pathExists(modDir)) {
+          await this.copyModKeys(modDir, keysPath);
+        }
+      } catch (error) {
+        console.warn(`Error registering scanned mod ${mod.modName || mod.workshopId}:`, error.message);
+      }
+    }
+
+    return { success: true, found: installed.length, added, alreadyKnown, mods: results };
   }
 
   /**

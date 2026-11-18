@@ -148,6 +148,11 @@ class App {
             case 'rcon':
                 // RCON panel doesn't need special loading
                 break;
+            case 'ai':
+                if (window.aiSetupPanel) {
+                    window.aiSetupPanel.onShow();
+                }
+                break;
             case 'settings':
                 this.loadSettings();
                 break;

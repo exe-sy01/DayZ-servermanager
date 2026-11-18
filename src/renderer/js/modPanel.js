@@ -69,6 +69,11 @@ class ModPanel {
             this.scanWorkshopFolder();
         });
 
+        const scanServerBtn = document.getElementById('scan-server-directory');
+        if (scanServerBtn) {
+            scanServerBtn.addEventListener('click', () => this.scanServerDirectory());
+        }
+
         const scanLocalModsBtn = document.getElementById('scan-local-mods');
         if (scanLocalModsBtn) {
             scanLocalModsBtn.addEventListener('click', () => this.scanLocalMods());
@@ -819,6 +824,39 @@ class ModPanel {
             }
         } catch (error) {
             window.app.showError(`Failed to remove mod: ${error.message}`);
+        }
+    }
+
+    async scanServerDirectory() {
+        const btn = document.getElementById('scan-server-directory');
+        try {
+            if (!this.serverPath) {
+                this.serverPath = await window.electronAPI.configGetServerPath();
+            }
+            if (!this.serverPath) {
+                window.app.showError('Please set server installation path first');
+                return;
+            }
+
+            if (btn) { btn.disabled = true; btn.textContent = 'Scanning...'; }
+
+            const result = await window.electronAPI.workshopScanServer();
+            if (result.success) {
+                if (result.found === 0) {
+                    window.app.showSuccess('No mods found in the server directory');
+                } else if (result.added === 0) {
+                    window.app.showSuccess(`Found ${result.found} mod(s) — all already in the list`);
+                } else {
+                    window.app.showSuccess(`Found ${result.found} mod(s), added ${result.added} new (${result.alreadyKnown} already listed)`);
+                }
+                await this.loadMods();
+            } else {
+                window.app.showError(result.error || 'Failed to scan server directory');
+            }
+        } catch (error) {
+            window.app.showError(`Failed to scan server directory: ${error.message}`);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Scan Server Directory'; }
         }
     }
 

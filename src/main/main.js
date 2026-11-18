@@ -24,6 +24,7 @@ const rconManager = require('./rconManager');
 const modDependencyChecker = require('./modDependencyChecker');
 const notificationService = require('./notificationService');
 const serverUpdateChecker = require('./serverUpdateChecker');
+const aiSetup = require('./aiSetup');
 
 let mainWindow;
 
@@ -589,6 +590,15 @@ ipcMain.handle('workshop:scan-folder', async (event, workshopFolderPath, serverP
   }
 });
 
+ipcMain.handle('workshop:scan-server', async () => {
+  try {
+    const serverPath = config.getServerPath();
+    return await workshopManager.scanServerDirectory(serverPath);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('workshop:get-info', async (event, workshopId, installPath) => {
   return await workshopManager.getModInfo(workshopId, installPath);
 });
@@ -1035,6 +1045,65 @@ ipcMain.handle('notifications:clear', () => {
 notificationService.on('notification', (notification) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('notifications:new', notification);
+  }
+});
+
+// IPC Handlers - AI Setup (Claude API)
+aiSetup.on('progress', (data) => {
+  sendProgress('ai:progress', data);
+});
+
+ipcMain.handle('ai:get-config', async () => {
+  const cfg = config.getAnthropicConfig();
+  // Never send the full key back to the renderer — only whether one is set
+  return { hasApiKey: !!(cfg.apiKey && cfg.apiKey.trim()) };
+});
+
+ipcMain.handle('ai:set-api-key', async (event, apiKey) => {
+  try {
+    await config.setAnthropicConfig(apiKey);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('ai:generate-plan', async (event, userRequest) => {
+  try {
+    const serverPath = config.getServerPath();
+    const apiKey = config.getAnthropicConfig().apiKey;
+    return await aiSetup.generatePlan(serverPath, apiKey, userRequest);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('ai:apply-plan', async (event, plan) => {
+  try {
+    const serverPath = config.getServerPath();
+    return await aiSetup.applyPlan(serverPath, plan);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('ai:list-backups', async () => {
+  try {
+    const serverPath = config.getServerPath();
+    if (!serverPath) return { success: true, backups: [] };
+    const backups = await aiSetup.listBackups(serverPath);
+    return { success: true, backups };
+  } catch (error) {
+    return { success: false, error: error.message, backups: [] };
+  }
+});
+
+ipcMain.handle('ai:restore-backup', async (event, backupName) => {
+  try {
+    const serverPath = config.getServerPath();
+    return await aiSetup.restoreBackup(serverPath, backupName);
+  } catch (error) {
+    return { success: false, error: error.message };
   }
 });
 

@@ -25,13 +25,14 @@
     "electron-builder": "^24.9.1"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "adm-zip": "^0.5.10",
     "axios": "^1.6.0",
     "cheerio": "^1.0.0-rc.12",
-    "fs-extra": "^11.2.0",
     "chokidar": "^3.5.3",
-    "read-last-lines": "^1.8.0",
+    "fs-extra": "^11.2.0",
     "highlight.js": "^11.9.0",
-    "adm-zip": "^0.5.10",
+    "read-last-lines": "^1.8.0",
     "tar": "^6.2.0"
   },
   "build": {
@@ -59,4 +60,3 @@
     }
   }
 }
-

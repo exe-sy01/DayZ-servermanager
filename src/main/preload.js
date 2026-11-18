@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   workshopListInstalled: (installPath) => ipcRenderer.invoke('workshop:list-installed', installPath),
   workshopGetInfo: (workshopId, installPath) => ipcRenderer.invoke('workshop:get-info', workshopId, installPath),
   workshopScanFolder: (workshopFolderPath, serverPath) => ipcRenderer.invoke('workshop:scan-folder', workshopFolderPath, serverPath),
+  workshopScanServer: () => ipcRenderer.invoke('workshop:scan-server'),
   selectWorkshopFolder: () => ipcRenderer.invoke('workshop:select-folder'),
   removeModFolder: (serverPath, modName) => ipcRenderer.invoke('workshop:remove-mod-folder', serverPath, modName),
   workshopGetCollection: (collectionId) => ipcRenderer.invoke('workshop:get-collection', collectionId),
@@ -170,6 +171,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (event, notification) => callback(notification);
     ipcRenderer.on('notifications:new', handler);
     return () => ipcRenderer.removeListener('notifications:new', handler);
+  },
+
+  // AI Setup (Claude API)
+  aiGetConfig: () => ipcRenderer.invoke('ai:get-config'),
+  aiSetApiKey: (apiKey) => ipcRenderer.invoke('ai:set-api-key', apiKey),
+  aiGeneratePlan: (userRequest) => ipcRenderer.invoke('ai:generate-plan', userRequest),
+  aiApplyPlan: (plan) => ipcRenderer.invoke('ai:apply-plan', plan),
+  aiListBackups: () => ipcRenderer.invoke('ai:list-backups'),
+  aiRestoreBackup: (backupName) => ipcRenderer.invoke('ai:restore-backup', backupName),
+  onAiProgress: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('ai:progress', handler);
+    return () => ipcRenderer.removeListener('ai:progress', handler);
   },
 
   // Window controls

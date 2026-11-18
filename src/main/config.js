@@ -32,6 +32,9 @@ class Config {
         enabled: false,
         apiKey: ''
       },
+      anthropic: {
+        apiKey: ''
+      },
       launchConfig: {
         serverName: 'DayZ Server',
         port: 2302,
@@ -332,6 +335,24 @@ class Config {
    */
   getSteamApiConfig() {
     return this.get('steamApi') || { enabled: false, apiKey: '' };
+  }
+
+  /**
+   * Get Anthropic (Claude API) configuration
+   */
+  getAnthropicConfig() {
+    return this.get('anthropic') || { apiKey: '' };
+  }
+
+  /**
+   * Set Anthropic (Claude API) configuration
+   */
+  async setAnthropicConfig(apiKey) {
+    if (!this.config) {
+      await this.load();
+    }
+    this.config.anthropic = { apiKey: (apiKey || '').trim() };
+    return await this.save();
   }
 
   /**
